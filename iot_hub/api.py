@@ -20,6 +20,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
@@ -142,6 +143,7 @@ class Api:
         self._add("GET", "/readyz", Api.ready, "none")
         self._add("GET", "/metrics", Api.metrics, "none")
         self._add("GET", "/v1/time", Api.server_time, "none")
+        self._add("GET", "/console", Api.console, "none")
 
         # Vehicle-facing
         self._add("POST", "/v1/telemetry", Api.post_telemetry, "vehicle")
@@ -282,6 +284,38 @@ class Api:
 
     def metrics(self, request: Request) -> Response:
         return Response(body=self.hub.metrics.render().encode("utf-8"), content_type="text/plain; version=0.0.4")
+
+    def console(self, request: Request) -> Response:
+        """Serve the operator console.
+
+        Unauthenticated because the page carries no data and no credential --
+        it is inert markup until an operator supplies a key, which it keeps in
+        sessionStorage and never sends anywhere but this hub. Serving it from
+        the hub is what makes it work at all: the depot has no internet, so
+        there is no CDN to load from and no cross-origin to negotiate.
+        """
+        if not self.config.console_enabled:
+            raise HttpError(404, "operator console is disabled")
+        try:
+            markup = _console_markup()
+        except OSError as exc:
+            log.error("cannot read the console template: %s", exc)
+            raise HttpError(500, "console template unavailable") from None
+        return Response(
+            body=markup,
+            content_type="text/html; charset=utf-8",
+            headers={
+                # The page loads nothing off-origin and evaluates no remote
+                # code, so say so: this closes the injection routes that a
+                # dashboard rendering vehicle-supplied strings would otherwise
+                # leave open.
+                "Content-Security-Policy":
+                    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                    "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'",
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
 
     def server_time(self, request: Request) -> Response:
         """The hub is the fleet's time authority; there is no NTP upstream here."""
@@ -518,6 +552,20 @@ class Api:
         if command is None:
             raise HttpError(404, "unknown command")
         return json_response(command.public())
+
+
+#: The console is a file on disk beside this module, read once and cached. It
+#: is deliberately not a Python string constant: it is a real HTML document and
+#: wants to be editable as one.
+_CONSOLE_PATH = Path(__file__).with_name("console.html")
+_console_cache: bytes | None = None
+
+
+def _console_markup() -> bytes:
+    global _console_cache
+    if _console_cache is None:
+        _console_cache = _CONSOLE_PATH.read_bytes()
+    return _console_cache
 
 
 def _is_number(value: str) -> bool:

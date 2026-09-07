@@ -109,6 +109,12 @@ class Config:
     #: operator key can do. Presented on the same header; the hub decides the
     #: scope, so a client cannot widen its own access by choosing a header.
     viewer_key: str = ""
+
+    #: Serve the operator console at /console. The page ships no credential and
+    #: is inert until someone supplies a key, so this is a static asset rather
+    #: than an access path -- but it is still surface, and a depot that drives
+    #: its hub purely from the CLI can switch it off.
+    console_enabled: bool = True
     #: Operator and provisioning keys are static bearer tokens: unlike a vehicle
     #: signature, the secret itself crosses the wire on every request, and the
     #: operator API can hand out vehicle secrets. Over plain HTTP on an
@@ -162,6 +168,7 @@ class Config:
             provisioning_key=os.environ.get("HUB_PROVISIONING_KEY", ""),
             operator_key=os.environ.get("HUB_OPERATOR_KEY", ""),
             viewer_key=os.environ.get("HUB_VIEWER_KEY", ""),
+            console_enabled=_env_bool("HUB_CONSOLE_ENABLED", True),
             allow_insecure_operator_api=_env_bool("HUB_ALLOW_INSECURE_OPERATOR_API", False),
             max_body_bytes=_env_int("HUB_MAX_BODY_BYTES", 1_048_576),
             max_batch_points=_env_int("HUB_MAX_BATCH_POINTS", 500),

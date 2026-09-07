@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Depot Command Center</title>
+<!--
+  Served by the hub itself, from the hub's own origin.
+
+  Two constraints shape this file and are worth stating, because both are easy
+  to break by habit:
+
+  * No external resources. The depot has no internet, so a webfont link or a
+    CDN script would fail silently and take the console's typography or its
+    behaviour with it. System font stack, inline CSS, inline JS, nothing else.
+  * No map tiles, for the same reason. Positions are projected from the
+    fleet's own bounding box onto a plain grid, with a scale bar for distance.
+
+  Everything the page renders from the API is written with textContent or
+  createElement. Vehicle-supplied strings -- fault codes, firmware versions,
+  the extra{} bag -- are signed but not sanitised, and a compromised vehicle
+  putting markup in a fault code must not get script execution in an
+  operator's browser.
+-->
+<style>
+  :root {
+    --ground:#0B1116; --panel:#131C22; --raised:#1A252C;
+    --line:#24313A; --line-soft:#1B252C;
+    --ink:#E6EEF2; --muted:#8FA3AD; --faint:#63757E;
+    --accent:#4FB8B8;
+    --good:#0ca30c; --warning:#fab219; --critical:#d03b3b; --stale:#63757E;
+    --mode-auto:#3987e5; --mode-manual:#d95926; --mode-charge:#199e70;
+    --mode-teleop:#c98500; --mode-parked:#d55181;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --ground:#EEF1F3; --panel:#FBFCFD; --raised:#F3F6F7;
+      --line:#C9D3D9; --line-soft:#DFE6EA;
+      --ink:#101A1F; --muted:#55676F; --faint:#7C8D95; --accent:#0A6C74;
+    }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--ground); color:var(--ink);
+    font-family:var(--sans); font-size:14px; line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  .console { display:flex; flex-direction:column; gap:12px; padding:12px; max-width:1680px; margin:0 auto; }
+
+  .statusbar {
+    display:flex; flex-wrap:wrap; align-items:center; gap:10px 22px;
+    background:var(--panel); border:1px solid var(--line); padding:12px 16px;
+  }
+  .brand { font-weight:700; font-size:16px; letter-spacing:.01em; }
+  .brand span { font-family:var(--mono); font-size:10.5px; font-weight:500; letter-spacing:.12em; color:var(--muted); margin-left:10px; }
+  .health { display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; }
+  .hi { display:flex; align-items:center; gap:7px; font-family:var(--mono); font-size:11px; letter-spacing:.04em; color:var(--muted); }
+  .hi b { color:var(--ink); font-weight:500; }
+  .lamp { width:9px; height:9px; border-radius:50%; flex:none; background:var(--stale); }
+  .lamp.ok{background:var(--good)} .lamp.warn{background:var(--warning)} .lamp.crit{background:var(--critical)}
+  .spacer { flex:1 1 auto; }
+
+  .main { display:grid; grid-template-columns:minmax(0,1.75fr) minmax(300px,1fr); gap:12px; }
+  @media (max-width:1080px){ .main{grid-template-columns:1fr} }
+  .lower { display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:12px; }
+
+  .panel { background:var(--panel); border:1px solid var(--line); display:flex; flex-direction:column; min-width:0; }
+  .ph { display:flex; align-items:center; gap:12px; padding:10px 14px; border-bottom:1px solid var(--line); }
+  .ph h2 { font-size:12.5px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; margin:0; }
+  .ph .src { font-family:var(--mono); font-size:10px; color:var(--faint); margin-left:auto; }
+  .pb { padding:14px; }
+
+  #map { display:block; width:100%; height:auto; background:var(--raised); }
+  .legend { display:flex; flex-wrap:wrap; gap:6px 18px; padding:10px 14px; border-top:1px solid var(--line);
+            font-family:var(--mono); font-size:10.5px; color:var(--muted); align-items:center; }
+  .legend i { display:inline-flex; align-items:center; gap:6px; font-style:normal; }
+
+  .queue { display:flex; flex-direction:column; overflow-y:auto; max-height:452px; }
+  .qrow { display:grid; grid-template-columns:3px 80px 1fr auto; gap:10px; align-items:center;
+          padding:9px 14px 9px 0; border:none; border-bottom:1px solid var(--line-soft);
+          background:none; color:inherit; font:inherit; text-align:left; width:100%; cursor:pointer; }
+  .qrow:hover, .qrow[aria-selected="true"] { background:var(--raised); }
+  .qrow:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  .stripe { align-self:stretch; }
+  .stripe.crit{background:var(--critical)} .stripe.warn{background:var(--warning)} .stripe.stale{background:var(--stale)}
+  .qid { font-family:var(--mono); font-size:12px; }
+  .qwhat { font-size:12.5px; color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .qage { font-family:var(--mono); font-size:11px; color:var(--faint); font-variant-numeric:tabular-nums; }
+
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
+          border-top:1px solid var(--line-soft); border-left:1px solid var(--line-soft); }
+  .kpi { border-bottom:1px solid var(--line-soft); border-right:1px solid var(--line-soft);
+         padding:11px 13px; display:flex; flex-direction:column; gap:2px; }
+  .kpi .v { font-size:24px; font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums; line-height:1.1; }
+  .kpi .v small { font-size:14px; color:var(--muted); font-weight:500; }
+  .kpi .k { font-family:var(--mono); font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  .kpi .s { font-family:var(--mono); font-size:10px; color:var(--faint); }
+  .kpi .v.crit{color:var(--critical)} .kpi .v.warn{color:var(--warning)} .kpi .v.good{color:var(--good)}
+
+  .modebar { display:flex; height:26px; gap:2px; }
+  .modekey { display:grid; grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); gap:6px 14px;
+             margin-top:12px; font-family:var(--mono); font-size:11px; color:var(--muted); }
+  .modekey i { display:inline-block; width:9px; height:9px; margin-right:7px; vertical-align:middle; }
+  .modekey b { color:var(--ink); font-weight:500; font-variant-numeric:tabular-nums; }
+
+  .rows { display:flex; flex-direction:column; gap:8px; }
+  .row3 { display:grid; grid-template-columns:70px 1fr 44px; gap:10px; align-items:center; }
+  .rlabel { font-family:var(--mono); font-size:10.5px; color:var(--muted); }
+  .rtrack { background:var(--raised); height:15px; }
+  .rfill { height:100%; }
+  .rval { font-family:var(--mono); font-size:11px; font-variant-numeric:tabular-nums; }
+
+  .events { display:flex; flex-direction:column; overflow-y:auto; max-height:250px; }
+  .ev { display:grid; grid-template-columns:64px 100px 1fr; gap:10px; padding:7px 14px;
+        border-bottom:1px solid var(--line-soft); font-size:12px; align-items:baseline; }
+  .ev time, .ev .who { font-family:var(--mono); font-size:10.5px; color:var(--faint); font-variant-numeric:tabular-nums; }
+  .ev .who { color:var(--muted); }
+  .ev .what { color:var(--muted); overflow-wrap:anywhere; }
+
+  /* key gate */
+  #gate { position:fixed; inset:0; background:var(--ground); display:flex; align-items:center; justify-content:center; z-index:40; }
+  #gate form { background:var(--panel); border:1px solid var(--line); padding:26px 28px; width:min(420px,92vw);
+               display:flex; flex-direction:column; gap:14px; }
+  #gate h1 { margin:0; font-size:17px; font-weight:700; }
+  #gate p { margin:0; color:var(--muted); font-size:12.5px; }
+  #gate input { font-family:var(--mono); font-size:13px; padding:10px 12px; background:var(--raised);
+                border:1px solid var(--line); color:var(--ink); }
+  #gate input:focus-visible { outline:2px solid var(--accent); outline-offset:-1px; }
+  #gate button { font-size:13px; font-weight:600; padding:10px 14px; background:var(--accent);
+                 color:#04191b; border:none; cursor:pointer; }
+  #gate .err { color:var(--critical); font-size:12.5px; min-height:1.2em; }
+
+  #tip { position:fixed; z-index:30; background:var(--raised); border:1px solid var(--line);
+         padding:9px 11px; font-family:var(--mono); font-size:11px; line-height:1.65;
+         pointer-events:none; display:none; white-space:pre; box-shadow:0 6px 22px rgba(0,0,0,.45); }
+  footer { font-family:var(--mono); font-size:10.5px; color:var(--faint); padding:2px 2px 10px; }
+  @media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important} }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <form id="gate-form">
+    <h1>Depot Command Center</h1>
+    <p>Enter a viewer key to watch the fleet. The key stays in this tab and is sent only to this hub.</p>
+    <input id="gate-key" type="password" placeholder="X-Operator-Key" autocomplete="off" spellcheck="false" autofocus>
+    <div class="err" id="gate-err"></div>
+    <button type="submit">Connect</button>
+  </form>
+</div>
+
+<div class="console" hidden id="app">
+  <div class="statusbar">
+    <div class="brand">Depot Command Center <span id="scope-label">—</span></div>
+    <div class="health">
+      <div class="hi"><span class="lamp" id="lamp-link"></span>Link <b id="v-link">connecting</b></div>
+      <div class="hi"><span class="lamp" id="lamp-hub"></span>Hub <b id="v-hub">—</b></div>
+      <div class="hi"><span class="lamp" id="lamp-disk"></span>Disk <b id="v-disk">—</b></div>
+      <div class="hi"><span class="lamp" id="lamp-ingest"></span>Ingest <b id="v-ingest">—</b></div>
+      <div class="hi">Hub clock <b id="v-clock">—</b></div>
+    </div>
+    <div class="spacer"></div>
+    <button id="signout" style="font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;background:none;border:1px solid var(--line);color:var(--muted);padding:6px 12px;cursor:pointer">FORGET KEY</button>
+  </div>
+
+  <div class="main">
+    <section class="panel">
+      <div class="ph"><h2>Fleet position</h2><span class="src">GET /v1/fleet/map</span></div>
+      <svg id="map" viewBox="0 0 900 470" role="img"
+           aria-label="Live fleet positions. Shape encodes status: dot nominal, ringed dot caution, triangle critical, dashed ring stale."></svg>
+      <div class="legend">
+        <i><svg width="14" height="14"><circle cx="7" cy="7" r="3.2" fill="#0ca30c"></circle></svg>Nominal</i>
+        <i><svg width="14" height="14"><circle cx="7" cy="7" r="5.4" fill="none" stroke="#fab219" stroke-width="1.6"></circle><circle cx="7" cy="7" r="2" fill="#fab219"></circle></svg>Caution</i>
+        <i><svg width="14" height="14"><polygon points="7,2 12.2,11 1.8,11" fill="#d03b3b"></polygon></svg>Critical</i>
+        <i><svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke="#63757E" stroke-width="1.5" stroke-dasharray="2 2"></circle></svg>Stale</i>
+        <i style="color:var(--faint)">Shape carries status — colour alone fails for red/green colour blindness.</i>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="ph"><h2>Needs attention</h2><span class="src" id="queue-count">—</span></div>
+      <div class="queue" id="queue"></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="ph"><h2>Fleet state</h2><span class="src">GET /v1/fleet</span></div>
+    <div class="kpis" id="kpis"></div>
+  </section>
+
+  <div class="lower">
+    <section class="panel">
+      <div class="ph"><h2>Operating mode</h2><span class="src">modes{}</span></div>
+      <div class="pb"><div class="modebar" id="modebar"></div><div class="modekey" id="modekey"></div></div>
+    </section>
+    <section class="panel">
+      <div class="ph"><h2>Time since last report</h2><span class="src">now − received_at</span></div>
+      <div class="pb"><div class="rows" id="hist"></div></div>
+    </section>
+    <section class="panel">
+      <div class="ph"><h2>Command pipeline</h2><span class="src">GET /v1/status</span></div>
+      <div class="pb"><div class="rows" id="pipe"></div></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="ph"><h2>Event log</h2><span class="src">GET /v1/events</span></div>
+    <div class="events" id="events"></div>
+  </section>
+
+  <footer id="foot">—</footer>
+</div>
+
+<div id="tip" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+  var SVG = "http://www.w3.org/2000/svg";
+  var KEY_NAME = "hub.viewer.key";
+  var key = null;
+  var latest = { map: [], fleet: null, status: null };
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, attrs) {
+    var n = document.createElementNS(SVG, tag);
+    for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k)) n.setAttribute(k, attrs[k]); }
+    return n;
+  }
+  // Every value that came off the wire goes through textContent, never innerHTML.
+  function text(tag, cls, value) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (value !== undefined && value !== null) n.textContent = String(value);
+    return n;
+  }
+
+  function api(path) {
+    return fetch(path, { headers: { "X-Operator-Key": key }, cache: "no-store" })
+      .then(function (r) {
+        if (r.status === 401) { var e = new Error("key rejected"); e.auth = true; throw e; }
+        if (r.status === 403) { var f = new Error("key lacks read scope"); f.auth = true; throw f; }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
+  }
+
+  // ---- key gate ---------------------------------------------------------
+  function saveKey(value) {
+    key = value;
+    try { sessionStorage.setItem(KEY_NAME, value); } catch (e) { /* private mode: hold in memory */ }
+  }
+  function forgetKey() {
+    key = null;
+    try { sessionStorage.removeItem(KEY_NAME); } catch (e) {}
+    location.reload();
+  }
+
+  $("gate-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var value = $("gate-key").value.trim();
+    if (!value) return;
+    $("gate-err").textContent = "";
+    key = value;
+    api("/v1/fleet").then(function () {
+      saveKey(value);
+      $("gate").remove();
+      $("app").hidden = false;
+      start();
+    }).catch(function (err) {
+      key = null;
+      $("gate-err").textContent = err.auth ? "That key was refused by the hub." : "Cannot reach the hub: " + err.message;
+    });
+  });
+  $("signout").addEventListener("click", forgetKey);
+
+  // ---- map --------------------------------------------------------------
+  var W = 900, H = 470, PAD = 34;
+  var mapEl = $("map"), tip = $("tip"), selected = null;
+
+  function project(points) {
+    // No tiles to fetch out here, so the map is the fleet's own bounding box
+    // projected onto a plain grid, with one scale on both axes so distances
+    // are not distorted.
+    var lats = points.map(function (p) { return p.lat; });
+    var lons = points.map(function (p) { return p.lon; });
+    var minLat = Math.min.apply(null, lats), maxLat = Math.max.apply(null, lats);
+    var minLon = Math.min.apply(null, lons), maxLon = Math.max.apply(null, lons);
+    var midLat = (minLat + maxLat) / 2;
+    var cos = Math.cos(midLat * Math.PI / 180) || 1;
+    var spanY = Math.max((maxLat - minLat) * 111320, 40);          // metres
+    var spanX = Math.max((maxLon - minLon) * 111320 * cos, 40);
+    var scale = Math.min((W - 2 * PAD) / spanX, (H - 2 * PAD) / spanY);
+    return {
+      scale: scale, midLat: midLat, cos: cos,
+      minLon: minLon, maxLon: maxLon, minLat: minLat, maxLat: maxLat,
+      x: function (lon) { return W / 2 + (lon - (minLon + maxLon) / 2) * 111320 * cos * scale; },
+      y: function (lat) { return H / 2 - (lat - midLat) * 111320 * scale; }
+    };
+  }
+
+  function statusOf(v, now) {
+    var age = now - v.received_at;
+    if (age > 90) return "stale";
+    if ((v.faults && v.faults.length) || v.battery_soc < 12) return "critical";
+    if (v.battery_soc < 20) return "caution";
+    return "nominal";
+  }
+  var HEX = { nominal: "#0ca30c", caution: "#fab219", critical: "#d03b3b", stale: "#63757E" };
+
+  function drawMap(points, now) {
+    while (mapEl.firstChild) mapEl.removeChild(mapEl.firstChild);
+    if (!points.length) {
+      var none = el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "currentColor",
+                              "font-size": "12", opacity: ".5" });
+      none.textContent = "no vehicles reporting";
+      mapEl.appendChild(none);
+      return;
+    }
+    var p = project(points);
+
+    // scale bar: the honest substitute for a basemap
+    var metres = [50, 100, 250, 500, 1000, 2000].filter(function (m) { return m * p.scale < 190; }).pop() || 25;
+    var barW = metres * p.scale;
+    mapEl.appendChild(el("line", { x1: 20, y1: H - 18, x2: 20 + barW, y2: H - 18,
+                                   stroke: "currentColor", "stroke-width": "2", opacity: ".45" }));
+    var lab = el("text", { x: 20, y: H - 24, fill: "currentColor", "font-size": "10",
+                           opacity: ".55", "font-family": "monospace" });
+    lab.textContent = metres >= 1000 ? (metres / 1000) + " km" : metres + " m";
+    mapEl.appendChild(lab);
+
+    points.forEach(function (v) {
+      var st = statusOf(v, now), hex = HEX[st];
+      var x = p.x(v.lon), y = p.y(v.lat), node;
+      if (st === "critical") {
+        node = el("polygon", { points: (x) + "," + (y - 5.2) + " " + (x + 4.8) + "," + (y + 3.6) + " " + (x - 4.8) + "," + (y + 3.6),
+                               fill: hex, stroke: "var(--panel)", "stroke-width": "1.2" });
+      } else if (st === "caution") {
+        node = el("g", {});
+        node.appendChild(el("circle", { cx: x, cy: y, r: 5.2, fill: "none", stroke: hex, "stroke-width": "1.5" }));
+        node.appendChild(el("circle", { cx: x, cy: y, r: 1.9, fill: hex }));
+      } else if (st === "stale") {
+        node = el("circle", { cx: x, cy: y, r: 4, fill: "none", stroke: hex,
+                              "stroke-width": "1.4", "stroke-dasharray": "2 2" });
+      } else {
+        node = el("circle", { cx: x, cy: y, r: 3, fill: hex, opacity: ".9" });
+      }
+      node.setAttribute("data-id", v.vehicle_id);
+      node.style.cursor = "crosshair";
+      mapEl.appendChild(node);
+      if (selected === v.vehicle_id) {
+        mapEl.appendChild(el("circle", { cx: x, cy: y, r: 13, fill: "none",
+                                         stroke: "var(--accent)", "stroke-width": "1.8" }));
+      }
+    });
+  }
+
+  mapEl.addEventListener("mousemove", function (e) {
+    var t = e.target, id = t.getAttribute && t.getAttribute("data-id");
+    if (!id && t.parentNode && t.parentNode.getAttribute) id = t.parentNode.getAttribute("data-id");
+    var v = null;
+    for (var i = 0; i < latest.map.length; i++) { if (latest.map[i].vehicle_id === id) { v = latest.map[i]; break; } }
+    if (!v) { tip.style.display = "none"; return; }
+    var now = Date.now() / 1000;
+    tip.textContent =
+      v.vehicle_id + "\n" +
+      "mode      " + v.mode + "\n" +
+      "battery   " + v.battery_soc.toFixed(1) + "%\n" +
+      "speed     " + v.speed_mps.toFixed(1) + " m/s\n" +
+      "heading   " + Math.round(v.heading_deg) + "°\n" +
+      "last seen " + fmtAge(now - v.received_at) + "\n" +
+      "seq       " + v.seq +
+      (v.faults && v.faults.length ? "\nfaults    " + v.faults.join(", ") : "");
+    tip.style.display = "block";
+    var r = tip.getBoundingClientRect(), x = e.clientX + 14, y = e.clientY + 14;
+    if (x + r.width > innerWidth - 8) x = e.clientX - r.width - 14;
+    if (y + r.height > innerHeight - 8) y = e.clientY - r.height - 14;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  });
+  mapEl.addEventListener("mouseleave", function () { tip.style.display = "none"; });
+
+  function fmtAge(s) {
+    if (s < 90) return Math.max(0, s).toFixed(0) + "s ago";
+    if (s < 5400) return Math.round(s / 60) + "m ago";
+    return Math.round(s / 3600) + "h ago";
+  }
+
+  // ---- renderers --------------------------------------------------------
+  function renderQueue(points, now) {
+    var rank = { critical: 0, caution: 1, stale: 2 };
+    var needs = points.map(function (v) { return { v: v, st: statusOf(v, now) }; })
+      .filter(function (r) { return r.st !== "nominal"; })
+      .sort(function (a, b) { return (rank[a.st] - rank[b.st]) || ((now - b.v.received_at) - (now - a.v.received_at)); });
+
+    $("queue-count").textContent = needs.length + (needs.length === 1 ? " vehicle" : " vehicles");
+    var q = $("queue");
+    while (q.firstChild) q.removeChild(q.firstChild);
+
+    needs.forEach(function (r) {
+      var v = r.v, row = document.createElement("button");
+      row.type = "button"; row.className = "qrow";
+      row.setAttribute("aria-selected", selected === v.vehicle_id ? "true" : "false");
+
+      var cls = r.st === "critical" ? "crit" : (r.st === "caution" ? "warn" : "stale");
+      row.appendChild(text("span", "stripe " + cls));
+      row.appendChild(text("span", "qid", v.vehicle_id));
+
+      var what;
+      if (r.st === "critical" && v.faults && v.faults.length) what = v.faults.join(", ");
+      else if (r.st === "critical") what = "battery " + v.battery_soc.toFixed(0) + "% — below reserve";
+      else if (r.st === "caution") what = "battery " + v.battery_soc.toFixed(0) + "%";
+      else what = "no report — buffering locally";
+      row.appendChild(text("span", "qwhat", what));
+      row.appendChild(text("span", "qage", fmtAge(now - v.received_at)));
+
+      row.addEventListener("click", function () {
+        selected = (selected === v.vehicle_id) ? null : v.vehicle_id;
+        drawMap(latest.map, Date.now() / 1000);
+        renderQueue(latest.map, Date.now() / 1000);
+      });
+      q.appendChild(row);
+    });
+  }
+
+  function tile(value, unit, label, sub, cls) {
+    var d = text("div", "kpi");
+    var v = text("span", "v " + (cls || ""), value);
+    if (unit) { var s = document.createElement("small"); s.textContent = unit; v.appendChild(s); }
+    d.appendChild(v);
+    d.appendChild(text("span", "k", label));
+    d.appendChild(text("span", "s", sub));
+    return d;
+  }
+
+  function renderKpis(fleet, points, now) {
+    var reporting = points.filter(function (v) { return now - v.received_at <= 15; }).length;
+    var counts = { critical: 0, caution: 0, stale: 0 };
+    points.forEach(function (v) { var s = statusOf(v, now); if (counts[s] !== undefined) counts[s]++; });
+
+    var k = $("kpis");
+    while (k.firstChild) k.removeChild(k.firstChild);
+    k.appendChild(tile(fleet.online, "/" + fleet.fleet_size, "Contactable", "long-poll held open"));
+    k.appendChild(tile(reporting, "", "Reporting", "telemetry < 15 s old", reporting < fleet.online ? "warn" : ""));
+    k.appendChild(tile(counts.critical, "", "Critical", "fault or below reserve", counts.critical ? "crit" : "good"));
+    k.appendChild(tile(counts.caution, "", "Caution", "battery under 20%", counts.caution ? "warn" : ""));
+    k.appendChild(tile(counts.stale, "", "Stale", "no report > 90 s", counts.stale ? "warn" : ""));
+    k.appendChild(tile(fleet.mean_battery_soc === null ? "—" : Math.round(fleet.mean_battery_soc), "%", "Mean battery", "fleet-wide"));
+    k.appendChild(tile(fleet.offline, "", "Offline", "not contactable", fleet.offline ? "warn" : ""));
+    k.appendChild(tile(fleet.inactive, "", "Inactive", "quarantined or retired", fleet.inactive ? "warn" : ""));
+  }
+
+  var MODE_COLOR = {
+    autonomous: "var(--mode-auto)", manual: "var(--mode-manual)", charging: "var(--mode-charge)",
+    teleop: "var(--mode-teleop)", parked: "var(--mode-parked)", fault: "var(--critical)"
+  };
+  var MODE_ORDER = ["autonomous", "charging", "manual", "teleop", "parked", "fault"];
+
+  function renderModes(modes) {
+    var bar = $("modebar"), keyEl = $("modekey");
+    while (bar.firstChild) bar.removeChild(bar.firstChild);
+    while (keyEl.firstChild) keyEl.removeChild(keyEl.firstChild);
+
+    MODE_ORDER.forEach(function (m) {
+      var n = modes[m] || 0;
+      if (!n) return;
+      var seg = document.createElement("div");
+      seg.style.flex = String(n);
+      seg.style.background = MODE_COLOR[m];
+      seg.title = m + ": " + n;
+      bar.appendChild(seg);
+
+      var item = document.createElement("span");
+      var swatch = document.createElement("i");
+      swatch.style.background = MODE_COLOR[m];
+      item.appendChild(swatch);
+      item.appendChild(document.createTextNode(m.charAt(0).toUpperCase() + m.slice(1) + " "));
+      item.appendChild(text("b", null, n));
+      keyEl.appendChild(item);
+    });
+  }
+
+  function renderRows(container, rows) {
+    var max = rows.reduce(function (m, r) { return Math.max(m, r.n); }, 0) || 1;
+    while (container.firstChild) container.removeChild(container.firstChild);
+    rows.forEach(function (r) {
+      var row = text("div", "row3");
+      row.appendChild(text("span", "rlabel", r.label));
+      var track = text("span", "rtrack");
+      var fill = text("span", "rfill");
+      fill.style.width = Math.max(1.5, (r.n / max) * 100) + "%";
+      fill.style.background = r.color;
+      track.appendChild(fill);
+      row.appendChild(track);
+      row.appendChild(text("span", "rval", r.n));
+      container.appendChild(row);
+    });
+  }
+
+  function renderHist(points, now) {
+    var b = [
+      { label: "0–5 s", lo: 0, hi: 5, color: "var(--mode-auto)" },
+      { label: "5–15 s", lo: 5, hi: 15, color: "var(--mode-auto)" },
+      { label: "15–30 s", lo: 15, hi: 30, color: "var(--mode-auto)" },
+      { label: "30–90 s", lo: 30, hi: 90, color: "var(--mode-auto)" },
+      { label: "> 90 s", lo: 90, hi: Infinity, color: "var(--stale)" }
+    ];
+    b.forEach(function (x) {
+      x.n = points.filter(function (v) { var a = now - v.received_at; return a > x.lo - (x.lo === 0 ? 1 : 0) && a <= x.hi; }).length;
+    });
+    renderRows($("hist"), b);
+  }
+
+  function renderPipe(status) {
+    var c = (status && status.commands) || {};
+    renderRows($("pipe"), [
+      { label: "Acked", n: c.acked || 0, color: "var(--good)" },
+      { label: "Leased", n: c.leased || 0, color: "var(--mode-auto)" },
+      { label: "Pending", n: c.pending || 0, color: "var(--muted)" },
+      { label: "Failed", n: c.failed || 0, color: "var(--critical)" }
+    ]);
+  }
+
+  function renderEvents(events) {
+    var box = $("events");
+    while (box.firstChild) box.removeChild(box.firstChild);
+    events.forEach(function (e) {
+      var row = text("div", "ev");
+      var t = document.createElement("time");
+      t.textContent = new Date(e.ts * 1000).toLocaleTimeString([], { hour12: false });
+      row.appendChild(t);
+      row.appendChild(text("span", "who", e.vehicle_id || "hub"));
+      var detail = "";
+      try { detail = JSON.stringify(e.detail); } catch (err) { detail = ""; }
+      if (detail === "{}") detail = "";
+      row.appendChild(text("span", "what", e.kind + (detail ? "  " + detail : "")));
+      box.appendChild(row);
+    });
+  }
+
+  function setLamp(id, cls, value) {
+    var lamp = $(id);
+    lamp.className = "lamp" + (cls ? " " + cls : "");
+    if (value !== undefined) $(id.replace("lamp-", "v-")).textContent = value;
+  }
+
+  function renderStatus(status) {
+    var disk = (status && status.checks && status.checks.disk) || null;
+    setLamp("lamp-hub", status && status.ready ? "ok" : "crit", status && status.ready ? "ready" : "not ready");
+    if (disk) {
+      var gb = (disk.free_bytes / 1e9).toFixed(1);
+      setLamp("lamp-disk", disk.state === "ok" ? "ok" : (disk.state === "warning" ? "warn" : "crit"),
+              disk.state + " · " + gb + " GB free");
+      setLamp("lamp-ingest", disk.shedding_telemetry ? "crit" : "ok",
+              disk.shedding_telemetry ? "SHEDDING" : "accepting");
+    }
+  }
+
+  // ---- polling ----------------------------------------------------------
+  var failures = 0;
+  function poll() {
+    Promise.all([api("/v1/fleet"), api("/v1/fleet/map")]).then(function (out) {
+      var fleet = out[0], points = out[1].vehicles || [];
+      latest.fleet = fleet; latest.map = points;
+      var now = Date.now() / 1000;
+
+      failures = 0;
+      setLamp("lamp-link", "ok", "live");
+      $("v-clock").textContent = new Date(fleet.generated_at * 1000).toLocaleTimeString([], { hour12: false });
+
+      drawMap(points, now);
+      renderQueue(points, now);
+      renderKpis(fleet, points, now);
+      renderModes(fleet.modes || {});
+      renderHist(points, now);
+      $("foot").textContent = "hub time " + new Date(fleet.generated_at * 1000).toISOString() +
+        " · " + points.length + " vehicles reporting · read-only view";
+    }).catch(function (err) {
+      failures++;
+      if (err.auth) { forgetKey(); return; }
+      setLamp("lamp-link", failures > 2 ? "crit" : "warn", "lost — " + err.message);
+    });
+  }
+
+  function pollSlow() {
+    api("/v1/status").then(function (s) { latest.status = s; renderStatus(s); renderPipe(s); })
+      .catch(function () { setLamp("lamp-hub", "warn", "unknown"); });
+    api("/v1/events?limit=40").then(function (e) { renderEvents(e.events || []); }).catch(function () {});
+  }
+
+  function start() {
+    $("scope-label").textContent = "READ-ONLY VIEW";
+    poll(); pollSlow();
+    setInterval(poll, 2000);
+    setInterval(pollSlow, 10000);
+  }
+
+  // A key already in this tab means straight through to the console.
+  try {
+    var stored = sessionStorage.getItem(KEY_NAME);
+    if (stored) {
+      key = stored;
+      api("/v1/fleet").then(function () {
+        $("gate").remove(); $("app").hidden = false; start();
+      }).catch(function () { key = null; try { sessionStorage.removeItem(KEY_NAME); } catch (e) {} });
+    }
+  } catch (e) { /* storage unavailable; the gate handles it */ }
+})();
+</script>
+</body>
+</html>
