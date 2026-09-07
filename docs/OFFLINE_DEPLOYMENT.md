@@ -37,6 +37,7 @@ sudo chown -R iot-hub:iot-hub /opt/iot-hub /var/lib/iot-hub
 sudo cp deploy/iot-hub.env /etc/iot-hub.env
 sudo chmod 600 /etc/iot-hub.env
 python3 -c "import secrets; print(secrets.token_hex(32))"   # -> HUB_OPERATOR_KEY
+python3 -c "import secrets; print(secrets.token_hex(32))"   # -> HUB_VIEWER_KEY (read-only)
 sudo nano /etc/iot-hub.env
 
 sudo cp deploy/iot-hub.service /etc/systemd/system/
