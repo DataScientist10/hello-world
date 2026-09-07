@@ -8,8 +8,27 @@ Three audiences:
 | Audience | Credential | Endpoints |
 |---|---|---|
 | Vehicles | HMAC signature (per-vehicle secret) | `/v1/telemetry`, `/v1/commands*` |
-| Operators | `X-Operator-Key` header | `/v1/fleet`, `/v1/vehicles*`, `/v1/status`, `/v1/events` |
+| Operators | `X-Operator-Key` = `HUB_OPERATOR_KEY` | everything below, including commands and enrolment |
+| Viewers | `X-Operator-Key` = `HUB_VIEWER_KEY` | **the `GET` operator endpoints only** |
 | Probes | none | `/healthz`, `/readyz`, `/metrics`, `/v1/time` |
+
+### Scopes
+
+Both operator keys travel on the same `X-Operator-Key` header, and **the hub
+decides the scope from the value presented** — a client cannot widen its own
+access by choosing a different header.
+
+| Scope | Can | Cannot |
+|---|---|---|
+| `operator` | Read everything, issue and broadcast commands, enrol vehicles, rotate secrets | — |
+| `viewer` | Read everything: fleet, map, status, events, vehicles, telemetry, commands | Any `POST`. Returns **403** with a message naming the key required |
+
+Give a dashboard the viewer key. The full operator key can broadcast a
+`pull_over` to 450 vehicles and can call `rotate-secret`, which returns a
+vehicle's signing secret in the response body — capabilities a wall display in
+a break room has no business holding. The two keys must differ; the hub refuses
+to start if they are equal, since a "read-only" key equal to the write key
+silently carries full scope.
 
 ---
 

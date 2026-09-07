@@ -27,6 +27,10 @@ HEADER_RESPONSE_SIGNATURE = "X-Response-Signature"
 HEADER_OPERATOR = "X-Operator-Key"
 HEADER_PROVISIONING = "X-Provisioning-Key"
 
+#: Scopes the operator header can resolve to.
+SCOPE_OPERATOR = "operator"      # reads, commands, enrolment, secret rotation
+SCOPE_VIEWER = "viewer"          # reads only
+
 SIGNATURE_VERSION = "v1"
 RESPONSE_SIGNATURE_VERSION = "v1-response"
 
@@ -183,13 +187,36 @@ class Authenticator:
         return vehicle
 
     # -- humans and back-office tools --------------------------------------
-    def authenticate_operator(self, headers) -> None:
-        configured = self._config.operator_key
-        if not configured:
+    def authenticate_operator(self, headers, require_write: bool = True) -> str:
+        """Resolve the caller's scope from the operator header. Returns the scope.
+
+        Two keys share one header. The *hub* decides which scope a presented
+        value carries, so a dashboard cannot widen its own access by choosing a
+        different header -- the only way to get write scope is to hold the
+        write key.
+        """
+        operator_key = self._config.operator_key
+        viewer_key = self._config.viewer_key
+        if not (operator_key or viewer_key):
             raise AuthError("operator API is disabled: set HUB_OPERATOR_KEY", status=403)
+
         presented = headers.get(HEADER_OPERATOR) or ""
-        if not hmac.compare_digest(configured, presented):
-            raise AuthError("invalid operator key")
+        # Compare against both before branching, so the response time does not
+        # reveal which key was closest to the value presented.
+        is_operator = bool(operator_key) and hmac.compare_digest(operator_key, presented)
+        is_viewer = bool(viewer_key) and hmac.compare_digest(viewer_key, presented)
+
+        if is_operator:
+            return SCOPE_OPERATOR
+        if is_viewer:
+            if require_write:
+                raise AuthError(
+                    "this key is read-only; issuing commands and managing vehicles "
+                    "requires the full operator key",
+                    status=403,
+                )
+            return SCOPE_VIEWER
+        raise AuthError("invalid operator key")
 
     def authenticate_provisioner(self, headers) -> None:
         configured = self._config.provisioning_key

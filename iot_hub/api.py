@@ -50,6 +50,8 @@ class Request:
     query: dict[str, list[str]] = field(init=False)
     #: Filled in by the router once authentication succeeds.
     vehicle: Any = None
+    #: "operator" or "viewer" for operator-header routes; None otherwise.
+    scope: str | None = None
     path_params: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -148,20 +150,20 @@ class Api:
         self._add("POST", "/v1/enroll", Api.enroll_self, "provisioning")
 
         # Operator-facing
-        self._add("GET", "/v1/fleet", Api.fleet_summary, "operator")
-        self._add("GET", "/v1/fleet/map", Api.fleet_map, "operator")
-        self._add("GET", "/v1/status", Api.hub_status, "operator")
-        self._add("GET", "/v1/events", Api.list_events, "operator")
-        self._add("GET", "/v1/vehicles", Api.list_vehicles, "operator")
+        self._add("GET", "/v1/fleet", Api.fleet_summary, "operator_read")
+        self._add("GET", "/v1/fleet/map", Api.fleet_map, "operator_read")
+        self._add("GET", "/v1/status", Api.hub_status, "operator_read")
+        self._add("GET", "/v1/events", Api.list_events, "operator_read")
+        self._add("GET", "/v1/vehicles", Api.list_vehicles, "operator_read")
         self._add("POST", "/v1/vehicles", Api.create_vehicle, "operator")
-        self._add("GET", "/v1/vehicles/{vehicle_id}", Api.get_vehicle, "operator")
+        self._add("GET", "/v1/vehicles/{vehicle_id}", Api.get_vehicle, "operator_read")
         self._add("POST", "/v1/vehicles/{vehicle_id}/status", Api.set_vehicle_status, "operator")
         self._add("POST", "/v1/vehicles/{vehicle_id}/rotate-secret", Api.rotate_secret, "operator")
-        self._add("GET", "/v1/vehicles/{vehicle_id}/telemetry", Api.vehicle_telemetry, "operator")
-        self._add("GET", "/v1/vehicles/{vehicle_id}/commands", Api.vehicle_commands, "operator")
+        self._add("GET", "/v1/vehicles/{vehicle_id}/telemetry", Api.vehicle_telemetry, "operator_read")
+        self._add("GET", "/v1/vehicles/{vehicle_id}/commands", Api.vehicle_commands, "operator_read")
         self._add("POST", "/v1/vehicles/{vehicle_id}/commands", Api.create_command, "operator")
         self._add("POST", "/v1/commands/broadcast", Api.broadcast_command, "operator")
-        self._add("GET", "/v1/commands/{command_id}", Api.get_command, "operator")
+        self._add("GET", "/v1/commands/{command_id}", Api.get_command, "operator_read")
 
     def handle(self, request: Request) -> Response:
         started = time.perf_counter()
@@ -246,8 +248,13 @@ class Api:
             request.vehicle = self.hub.auth.authenticate_vehicle(
                 request.headers, request.method, request.raw_path, request.body
             )
-        elif route.auth == "operator":
-            self.hub.auth.authenticate_operator(request.headers)
+        elif route.auth in ("operator", "operator_read"):
+            # Write routes demand the full key; read routes accept either, and
+            # the resolved scope is recorded for the audit trail.
+            request.scope = self.hub.auth.authenticate_operator(
+                request.headers, require_write=(route.auth == "operator")
+            )
+            self.hub.metrics.increment("hub_operator_requests_total", scope=request.scope)
         elif route.auth == "provisioning":
             self.hub.auth.authenticate_provisioner(request.headers)
 

@@ -100,7 +100,15 @@ class Config:
     #: disables online enrollment entirely (offline provisioning only).
     provisioning_key: str = ""
     #: Key operators/back-office tools present on the read + command API.
+    #: Full scope: reads, commands, enrolment, secret rotation.
     operator_key: str = ""
+    #: A second key with read-only scope, for anything that only needs to *see*
+    #: the fleet -- a wall dashboard, a monitoring box, a shift supervisor's
+    #: browser tab. Those consumers should not be holding a credential that can
+    #: broadcast a command or mint a vehicle secret, which is what the full
+    #: operator key can do. Presented on the same header; the hub decides the
+    #: scope, so a client cannot widen its own access by choosing a header.
+    viewer_key: str = ""
     #: Operator and provisioning keys are static bearer tokens: unlike a vehicle
     #: signature, the secret itself crosses the wire on every request, and the
     #: operator API can hand out vehicle secrets. Over plain HTTP on an
@@ -153,6 +161,7 @@ class Config:
             clock_skew_tolerance_seconds=_env_int("HUB_CLOCK_SKEW_SECONDS", 300),
             provisioning_key=os.environ.get("HUB_PROVISIONING_KEY", ""),
             operator_key=os.environ.get("HUB_OPERATOR_KEY", ""),
+            viewer_key=os.environ.get("HUB_VIEWER_KEY", ""),
             allow_insecure_operator_api=_env_bool("HUB_ALLOW_INSECURE_OPERATOR_API", False),
             max_body_bytes=_env_int("HUB_MAX_BODY_BYTES", 1_048_576),
             max_batch_points=_env_int("HUB_MAX_BATCH_POINTS", 500),
@@ -175,12 +184,17 @@ class Config:
         never expires -- and it can mint vehicle secrets via rotate-secret, so
         capturing it defeats the vehicle scheme entirely.
         """
-        if not (self.operator_key or self.provisioning_key):
+        if self.viewer_key and self.viewer_key == self.operator_key:
+            raise ValueError(
+                "HUB_VIEWER_KEY is identical to HUB_OPERATOR_KEY, so the read-only key "
+                "would carry full operator scope. Generate a separate value."
+            )
+        if not (self.operator_key or self.provisioning_key or self.viewer_key):
             return
         if self.tls_enabled or self.allow_insecure_operator_api:
             return
         raise ValueError(
-            "HUB_OPERATOR_KEY/HUB_PROVISIONING_KEY is set without TLS. These are bearer "
+            "HUB_OPERATOR_KEY/HUB_PROVISIONING_KEY/HUB_VIEWER_KEY is set without TLS. These are bearer "
             "tokens sent in cleartext and can be captured by anyone on the LAN. "
             "Set HUB_TLS_CERT/HUB_TLS_KEY, or set HUB_ALLOW_INSECURE_OPERATOR_API=true "
             "to accept that risk deliberately (testing or a trusted loopback only)."

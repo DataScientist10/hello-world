@@ -37,12 +37,15 @@ class HubTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="iot-hub-test-"))
         self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
-        self.config = Config(
-            data_dir=self.tmpdir,
-            operator_key=OPERATOR_KEY,
-            provisioning_key=PROVISIONING_KEY,
-            **self.config_overrides,
-        )
+        # Defaults first, then overrides, so a subclass can replace any of them
+        # (including clearing a key) rather than colliding with it.
+        settings = {
+            "data_dir": self.tmpdir,
+            "operator_key": OPERATOR_KEY,
+            "provisioning_key": PROVISIONING_KEY,
+        }
+        settings.update(self.config_overrides)
+        self.config = Config(**settings)
         self.hub = Hub(self.config)
         self.addCleanup(self.hub.shutdown)
         self.api = Api(self.hub)
