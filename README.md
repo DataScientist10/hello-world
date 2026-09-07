@@ -8,6 +8,8 @@ I look forward to learning from you as we work together to conquer the world's c
 
 # Offline IoT Hub for an Autonomous Vehicle Fleet
 
+[![CI](https://github.com/DataScientist10/hello-world/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/DataScientist10/hello-world/actions/workflows/ci.yml?query=branch%3Amaster)
+
 An HTTP IoT hub for **450 autonomous vehicles**, built to run on a depot
 network with **no internet connection**.
 
