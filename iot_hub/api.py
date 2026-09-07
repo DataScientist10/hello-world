@@ -252,6 +252,7 @@ class Api:
             self.hub.auth.authenticate_provisioner(request.headers)
 
     def _error(self, status: int, message: str, **detail: Any) -> Response:
+        retry_after = detail.pop("retry_after_seconds", None)
         payload: dict[str, Any] = {"error": {"status": status, "message": message}}
         if detail:
             payload["error"]["detail"] = detail
@@ -259,7 +260,8 @@ class Api:
             # Hand the vehicle our clock so its agent can self-correct without
             # an NTP server it cannot reach.
             payload["error"]["hub_time"] = time.time()
-        return json_response(payload, status=status)
+        headers = {"Retry-After": str(int(retry_after))} if retry_after else {}
+        return json_response(payload, status=status, **headers)
 
     # ==================================================================
     # Probes
@@ -282,6 +284,18 @@ class Api:
     # Vehicle API
     # ==================================================================
     def post_telemetry(self, request: Request) -> Response:
+        # Shed telemetry -- and only telemetry -- when the disk is critical.
+        # The vehicle already buffers to its own spool and retries, so a 503
+        # costs history latency, not data; the space that buys is what keeps
+        # command dispatch alive. Deliberately checked before parsing the body.
+        if self.hub.disk.shedding_telemetry:
+            self.hub.metrics.increment("hub_telemetry_shed_total")
+            raise HttpError(
+                503,
+                "hub is low on disk and is not accepting telemetry; buffer locally and retry",
+                retry_after_seconds=self.config.disk_check_interval_seconds,
+            )
+
         payload = request.json_object()
         points = payload.get("points")
         if points is None:
@@ -378,6 +392,7 @@ class Api:
             "commands": self.hub.commands.counts_by_state(),
             "vehicles": self.hub.registry.online_counts(self.config.vehicle_offline_after_seconds),
             "database_bytes": self.hub.storage.database_size_bytes(),
+            "disk": self.hub.disk.state.as_dict(),
             "counters": self.hub.metrics.snapshot_counters(),
             "uptime_seconds": time.time() - self.hub.metrics.started_at,
         })

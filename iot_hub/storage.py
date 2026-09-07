@@ -266,6 +266,48 @@ class Storage:
 
         return self.execute(_purge)
 
+    def purge_oldest_telemetry(self, limit: int, older_than: float) -> int:
+        """Delete up to ``limit`` of the oldest telemetry rows predating ``older_than``.
+
+        The last resort when time-based retention is not freeing space fast
+        enough. Two bounds matter: ``limit`` keeps one DELETE from stalling the
+        writer thread -- and with it every vehicle waiting on a commit -- and
+        ``older_than`` preserves a minimum window of recent history, so a full
+        disk cannot cost an incident investigation the very samples it needs.
+        """
+
+        def _purge(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                "DELETE FROM telemetry WHERE rowid IN ("
+                "  SELECT rowid FROM telemetry WHERE received_at < ?"
+                "  ORDER BY received_at ASC LIMIT ?"
+                ")",
+                (older_than, limit),
+            )
+            return cursor.rowcount or 0
+
+        return self.execute(_purge)
+
+    def checkpoint_wal(self) -> None:
+        """Fold the write-ahead log back into the database and truncate it.
+
+        Under sustained write load the -wal file grows and holds disk that
+        deleting rows alone will not give back, so this runs before any
+        emergency purge is judged to have failed.
+        """
+
+        def _checkpoint(conn: sqlite3.Connection) -> None:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        try:
+            self.execute(_checkpoint)
+        except sqlite3.Error:
+            pass                                # best effort; never fatal
+
+    def telemetry_row_count(self) -> int:
+        row = self.read().execute("SELECT COUNT(*) AS n FROM telemetry").fetchone()
+        return row["n"] if row else 0
+
     def log_event(self, kind: str, vehicle_id: str | None = None, detail: dict | None = None) -> None:
         payload = json.dumps(detail or {}, separators=(",", ":"))
         now = time.time()

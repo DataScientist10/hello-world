@@ -170,6 +170,40 @@ constraint is **not** CPU — it is:
   default 72 h retention. This is the number to check before deployment; see
   the sizing table in [OFFLINE_DEPLOYMENT.md](OFFLINE_DEPLOYMENT.md).
 
+### When the disk fills anyway
+
+Retention is a bet that the sample rate, the fleet size and the disk are all
+what they were on configuration day. Add vehicles, raise the rate, or hand the
+depot a smaller disk, and it fills between two purges — at which point SQLite
+starts failing writes, and a hub that cannot write cannot dispatch commands.
+
+So free space is watched directly, and pressure gets a graded response:
+
+| Free space | Response |
+|---|---|
+| below `min(20%, 20 GiB)` | Fold the WAL back, then halve the retention window |
+| below `max(512 MiB, min(7%, 5 GiB))` | Also **stop accepting telemetry** (503) and purge oldest-first in bounded batches |
+| recovered above the warning line | Resume ingest — recovery is at the *warning* line, not the critical one, so the hub cannot flap |
+
+Each threshold is a ratio **capped by an absolute headroom**, because neither
+measure alone survives both ends of the range. On a 270 GB disk, 12% free is
+32 GB — about five days at the measured 5.8 GB/day — and warning about it is
+noise. On a 20 GB disk, the same 12% is two days and genuinely urgent. Ratio
+alone cries wolf on big volumes; a fixed byte count is far too lax on them.
+
+The response is deliberately asymmetric. **Telemetry is shed and commands are
+protected**, because every vehicle already buffers telemetry to its own spool
+and retries, while nothing else in the depot can stop a vehicle. Refusing an
+upload costs latency on the fleet history; refusing a `pull_over` costs
+something else entirely.
+
+Two floors keep the cure from becoming the disease: the last hour of telemetry
+is never purged, however hard the disk squeezes, and each emergency DELETE is
+bounded so it cannot stall the single writer thread every vehicle is waiting
+on. If the disk is still critical with only protected history left, the hub
+says so loudly and stays in its shedding state — commands still dispatching —
+rather than deleting the samples an investigation would need.
+
 ### Where it stops scaling
 
 This design is right for one depot. It would need revisiting for:
@@ -194,6 +228,7 @@ This design is right for one depot. It would need revisiting for:
 | Vehicle clock is wrong | Hub returns its own time with the 401; the agent corrects its offset and retries |
 | Vehicle compromised | Operator quarantines it; signed requests are refused immediately |
 | Fleet-wide outage ends | Reconnects are backed off with jitter, so 450 vehicles don't stampede |
+| Disk fills | Telemetry is shed with a 503 and vehicles buffer it; **command dispatch keeps working** |
 
 ## Layout
 

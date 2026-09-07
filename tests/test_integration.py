@@ -190,6 +190,59 @@ class OutageTests(IntegrationTestCase):
         self.assertEqual(agent.flush_once(), 1, "the retry after resync should succeed")
 
 
+class DiskPressureTests(IntegrationTestCase):
+    """A full disk, exercised through the real agent over a real socket."""
+
+    GIB = 1024 ** 3
+
+    def _set_free(self, free_gib: float) -> None:
+        self.live.hub.disk._usage = lambda _p: (int(free_gib * self.GIB), 100 * self.GIB)
+        self.live.hub.disk.sample()
+
+    def test_agent_buffers_through_shedding_and_catches_up(self):
+        agent = self.make_agent(self.provision())
+        for _ in range(5):
+            agent.record(self.sample())
+        self.assertEqual(agent.flush_once(), 5)
+
+        # Disk fills; the hub starts refusing telemetry.
+        self._set_free(1)
+        for _ in range(12):
+            agent.record(self.sample())
+        self.assertEqual(agent.flush_once(), 0, "the hub is shedding, nothing should be accepted")
+        self.assertEqual(agent.spool.depth(), 12, "every sample must stay buffered on the vehicle")
+
+        # Space comes back.
+        self._set_free(60)
+        self.assertEqual(agent.flush_once(), 12)
+        self.assertEqual(agent.spool.depth(), 0)
+
+        points = self.live.operator("GET", "/v1/vehicles/av-001/telemetry?limit=100")[1]["points"]
+        self.assertEqual(len(points), 17, "nothing lost across the shedding window")
+
+    def test_commands_reach_a_vehicle_while_telemetry_is_shed(self):
+        """The asymmetry, end to end: a full disk must not stop an e-stop."""
+        credential = self.provision()
+        executed: list[dict] = []
+        agent = self.make_agent(credential, command_handler=lambda command: (
+            executed.append(command) or {"ok": True}
+        ))
+        agent.start(with_sampler=False)
+        time.sleep(0.5)
+
+        self._set_free(1)
+        agent.record(self.sample())
+        self.assertEqual(agent.flush_once(), 0, "telemetry should be shed")
+
+        self.live.operator("POST", "/v1/vehicles/av-001/commands",
+                           {"type": "pull_over", "payload": {"reason": "disk full"}})
+        deadline = time.time() + 10
+        while not executed and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(executed, "the command never arrived despite the disk being full")
+        self.assertEqual(executed[0]["type"], "pull_over")
+
+
 class CommandRoundTripTests(IntegrationTestCase):
     def test_command_reaches_a_long_polling_vehicle_and_is_acknowledged(self):
         credential = self.provision()

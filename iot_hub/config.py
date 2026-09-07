@@ -63,6 +63,34 @@ class Config:
     telemetry_retention_hours: int = 72
     purge_interval_seconds: int = 900
 
+    # --- disk pressure -----------------------------------------------------
+    #: Retention is a bet on the sample rate and the disk staying as configured.
+    #: These are the backstop for when that bet is wrong. Below the warning
+    #: line the hub purges harder than retention alone would; below the
+    #: critical line it also stops accepting telemetry so the remaining space
+    #: is kept for command dispatch. See iot_hub/diskguard.py.
+    #: Thresholds are a ratio of the volume *capped by an absolute headroom*,
+    #: because neither measure alone survives both ends of the range. On a
+    #: 270 GB disk, 12% free is 32 GB -- roughly five days at the measured
+    #: 5.8 GB/day -- and warning about it is noise; on a 20 GB disk, 12% is
+    #: two days and genuinely urgent. So: warn below min(20% , 20 GiB) and
+    #: shed below max(512 MiB, min(7%, 5 GiB)). At the fleet's measured burn
+    #: rate that is about 3.5 days of headroom to the warning and under a day
+    #: to shedding.
+    disk_warn_free_ratio: float = 0.20
+    disk_warn_free_cap_bytes: int = 20 * 1024 * 1024 * 1024
+    disk_critical_free_ratio: float = 0.07
+    disk_critical_free_cap_bytes: int = 5 * 1024 * 1024 * 1024
+    #: Hard floor regardless of disk size: SQLite needs room to delete rows.
+    disk_min_free_bytes: int = 512 * 1024 * 1024
+    disk_check_interval_seconds: int = 60
+    #: Never trim telemetry below this, however hard the disk is squeezing --
+    #: an incident investigation needs *some* history to look at.
+    disk_min_retention_hours: int = 1
+    #: Rows deleted per emergency-purge batch, so the writer thread is never
+    #: blocked for long by one enormous DELETE.
+    disk_purge_batch_rows: int = 50_000
+
     # --- security ----------------------------------------------------------
     #: Requests whose timestamp is further away than this are rejected. Keeps
     #: the replay-nonce cache small and bounds clock drift on vehicles that
@@ -114,6 +142,14 @@ class Config:
             data_dir=Path(os.environ.get("HUB_DATA_DIR", "/var/lib/iot-hub")),
             telemetry_retention_hours=_env_int("HUB_TELEMETRY_RETENTION_HOURS", 72),
             purge_interval_seconds=_env_int("HUB_PURGE_INTERVAL_SECONDS", 900),
+            disk_warn_free_ratio=_env_float("HUB_DISK_WARN_FREE_RATIO", 0.20),
+            disk_warn_free_cap_bytes=_env_int("HUB_DISK_WARN_FREE_CAP_BYTES", 20 * 1024 * 1024 * 1024),
+            disk_critical_free_ratio=_env_float("HUB_DISK_CRITICAL_FREE_RATIO", 0.07),
+            disk_critical_free_cap_bytes=_env_int("HUB_DISK_CRITICAL_FREE_CAP_BYTES", 5 * 1024 * 1024 * 1024),
+            disk_min_free_bytes=_env_int("HUB_DISK_MIN_FREE_BYTES", 512 * 1024 * 1024),
+            disk_check_interval_seconds=_env_int("HUB_DISK_CHECK_INTERVAL_SECONDS", 60),
+            disk_min_retention_hours=_env_int("HUB_DISK_MIN_RETENTION_HOURS", 1),
+            disk_purge_batch_rows=_env_int("HUB_DISK_PURGE_BATCH_ROWS", 50_000),
             clock_skew_tolerance_seconds=_env_int("HUB_CLOCK_SKEW_SECONDS", 300),
             provisioning_key=os.environ.get("HUB_PROVISIONING_KEY", ""),
             operator_key=os.environ.get("HUB_OPERATOR_KEY", ""),
@@ -148,6 +184,17 @@ class Config:
             "tokens sent in cleartext and can be captured by anyone on the LAN. "
             "Set HUB_TLS_CERT/HUB_TLS_KEY, or set HUB_ALLOW_INSECURE_OPERATOR_API=true "
             "to accept that risk deliberately (testing or a trusted loopback only)."
+        )
+
+    def disk_warn_bytes(self, total_bytes: int) -> float:
+        """Free-space level below which the hub purges harder than retention alone."""
+        return min(total_bytes * self.disk_warn_free_ratio, self.disk_warn_free_cap_bytes)
+
+    def disk_critical_bytes(self, total_bytes: int) -> float:
+        """Free-space level below which the hub also stops accepting telemetry."""
+        return max(
+            self.disk_min_free_bytes,
+            min(total_bytes * self.disk_critical_free_ratio, self.disk_critical_free_cap_bytes),
         )
 
     @property
