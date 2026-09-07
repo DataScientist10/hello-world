@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import ssl
 import logging
 import random
 import secrets
@@ -34,11 +35,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from iot_hub.auth import (        # noqa: E402  (path set up above so the agent can ship as one folder)
     HEADER_NONCE,
+    HEADER_RESPONSE_SIGNATURE,
     HEADER_SIGNATURE,
     HEADER_TIMESTAMP,
     HEADER_VEHICLE,
     sign,
+    verify_response,
 )
+from iot_hub.models import COMMAND_TYPES, Command, ValidationError   # noqa: E402
 from edge.spool import Spool      # noqa: E402
 
 log = logging.getLogger("edge.agent")
@@ -50,13 +54,26 @@ GZIP_THRESHOLD_BYTES = 1024
 class HubClient:
     """Signed HTTP client for one vehicle."""
 
-    def __init__(self, hub_url: str, vehicle_id: str, secret: str, timeout: float = 60.0) -> None:
+    def __init__(self, hub_url: str, vehicle_id: str, secret: str, timeout: float = 60.0,
+                 ca_cert: str | None = None) -> None:
         self.hub_url = hub_url.rstrip("/")
         self.vehicle_id = vehicle_id
         self.secret = secret
         self.timeout = timeout
         #: hub_time - local_time, applied when signing.
         self.clock_offset = 0.0
+        #: Depot CA to pin when the hub speaks HTTPS. There is no public CA to
+        #: fall back on here, so without pinning an HTTPS hub would be validated
+        #: against a system trust store that cannot possibly contain it.
+        self.ssl_context = None
+        if ca_cert:
+            try:
+                self.ssl_context = ssl.create_default_context(cafile=ca_cert)
+            except OSError as exc:
+                # Refuse to fall back to the system trust store: on a depot
+                # network that store cannot contain the hub's CA, so a silent
+                # fallback would mean trusting the wrong roots.
+                raise ValueError(f"cannot read depot CA bundle {ca_cert}: {exc}") from None
 
     # -- plumbing -----------------------------------------------------------
     def _headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
@@ -81,15 +98,34 @@ class HubClient:
         # Signed after compression: the signature covers the bytes on the wire.
         headers.update(self._headers(method, path, body))
 
+        nonce = headers[HEADER_NONCE]
         request = urllib.request.Request(self.hub_url + path, data=body or None, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
-                return response.status, _decode(response)
+            with urllib.request.urlopen(request, timeout=timeout or self.timeout,
+                                        context=self.ssl_context) as response:
+                raw = response.read()
+                self._verify(nonce, response.status, raw, response.headers.get(HEADER_RESPONSE_SIGNATURE))
+                return response.status, _decode_body(raw, response.headers.get("Content-Encoding"))
         except urllib.error.HTTPError as exc:
             parsed = _decode(exc)
             if exc.code == 401:
                 self._maybe_resync_clock(parsed)
             return exc.code, parsed
+
+    def _verify(self, nonce: str, status: int, raw: bytes, signature: str | None) -> None:
+        """Reject any 2xx response that the hub did not sign.
+
+        Only a holder of this vehicle's secret can produce the signature, so an
+        attacker who can answer the long poll -- by ARP or DNS spoofing on the
+        depot LAN -- can no longer inject commands. Non-2xx replies are left
+        unsigned on purpose: a 401 means authentication failed, so there is no
+        agreed secret to sign with, and those paths are treated as untrusted.
+        """
+        if not verify_response(self.secret, nonce, status, raw, signature):
+            raise ResponseAuthError(
+                f"response signature missing or invalid (status {status}); "
+                "the hub may be impersonated"
+            )
 
     def _maybe_resync_clock(self, parsed: Any) -> None:
         """Adopt the hub's clock when it says ours is out of the signing window."""
@@ -118,9 +154,12 @@ class HubClient:
         return True
 
 
-def _decode(response) -> Any:
-    raw = response.read()
-    if response.headers.get("Content-Encoding") == "gzip":
+class ResponseAuthError(Exception):
+    """The hub's response could not be authenticated."""
+
+
+def _decode_body(raw: bytes, content_encoding: str | None) -> Any:
+    if content_encoding == "gzip":
         raw = gzip.decompress(raw)
     if not raw:
         return {}
@@ -128,6 +167,10 @@ def _decode(response) -> Any:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {"raw": raw[:200].decode("utf-8", "replace")}
+
+
+def _decode(response) -> Any:
+    return _decode_body(response.read(), response.headers.get("Content-Encoding"))
 
 
 class VehicleAgent:
@@ -148,16 +191,18 @@ class VehicleAgent:
         batch_size: int = 200,
         max_spool_points: int = 20_000,
         fw_version: str = "unknown",
+        ca_cert: str | None = None,
     ) -> None:
         if credential_path is not None:
             credential = json.loads(Path(credential_path).read_text())
             vehicle_id = vehicle_id or credential["vehicle_id"]
             secret = secret or credential["secret"]
             hub_url = hub_url or credential.get("hub_url")
+            ca_cert = ca_cert or credential.get("ca_cert")
         if not (vehicle_id and secret and hub_url):
             raise ValueError("vehicle_id, secret and hub_url are required (directly or via credential_path)")
 
-        self.client = HubClient(hub_url, vehicle_id, secret)
+        self.client = HubClient(hub_url, vehicle_id, secret, ca_cert=ca_cert)
         self.vehicle_id = vehicle_id
         self.spool = Spool(spool_path, max_points=max_spool_points)
         self.sampler = sampler
@@ -167,7 +212,8 @@ class VehicleAgent:
         self.batch_size = batch_size
         self.fw_version = fw_version
 
-        self.stats = {"uploaded": 0, "commands_executed": 0, "upload_failures": 0}
+        self.stats = {"uploaded": 0, "commands_executed": 0, "upload_failures": 0,
+                      "commands_rejected": 0, "response_auth_failures": 0}
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
 
@@ -234,6 +280,11 @@ class VehicleAgent:
             status, body = self.client.request(
                 "POST", "/v1/telemetry", {"points": batch, "fw_version": self.fw_version}
             )
+        except ResponseAuthError as exc:
+            # Keep the samples spooled: something is answering for the hub.
+            self.stats["response_auth_failures"] += 1
+            log.error("refusing to trust telemetry response: %s", exc)
+            return 0
         except (urllib.error.URLError, OSError) as exc:
             self.stats["upload_failures"] += 1
             log.info("hub unreachable (%s); %d sample(s) buffered", exc, self.spool.depth())
@@ -287,6 +338,13 @@ class VehicleAgent:
                 backoff = 1.0
                 for command in body.get("commands", []):
                     self._execute(command)
+            except ResponseAuthError as exc:
+                # An unsigned or wrongly signed command list is an impersonation
+                # attempt, not a transient error. Execute nothing and back off.
+                self.stats["response_auth_failures"] += 1
+                log.error("refusing unauthenticated command response: %s", exc)
+                self._stop.wait(backoff)
+                backoff = _next_backoff(backoff)
             except (urllib.error.URLError, OSError) as exc:
                 log.info("command poll unreachable (%s)", exc)
                 self._stop.wait(backoff)
@@ -296,7 +354,32 @@ class VehicleAgent:
                 self._stop.wait(backoff)
                 backoff = _next_backoff(backoff)
 
+    @staticmethod
+    def _is_acceptable(command: dict[str, Any]) -> bool:
+        """Second gate on a command, applied on the vehicle itself.
+
+        The hub validates at enqueue time, but that check lives on the other
+        side of the network. Re-checking here means a malformed or out-of-range
+        command cannot reach the autonomy stack even if the hub is compromised
+        or a future bug lets one through.
+        """
+        if not isinstance(command, dict):
+            return False
+        if not isinstance(command.get("command_id"), str) or not command["command_id"]:
+            return False
+        if command.get("type") not in COMMAND_TYPES:
+            return False
+        try:
+            Command.validate(command.get("type"), command.get("payload") or {})
+        except ValidationError:
+            return False
+        return True
+
     def _execute(self, command: dict[str, Any]) -> None:
+        if not self._is_acceptable(command):
+            log.error("refusing malformed or unknown command: %r", command)
+            self.stats["commands_rejected"] += 1
+            return
         command_id = command.get("command_id")
         try:
             result = self.command_handler(command) or {}
@@ -307,7 +390,7 @@ class VehicleAgent:
         self.stats["commands_executed"] += 1
         try:
             self.client.request("POST", f"/v1/commands/{command_id}/ack", {"ok": ok, "result": result})
-        except (urllib.error.URLError, OSError):
+        except (ResponseAuthError, urllib.error.URLError, OSError):
             # The lease will expire and the hub will redeliver. Handlers are
             # expected to be idempotent on command_id for exactly this reason.
             log.warning("could not acknowledge %s; the hub will redeliver it", command_id)

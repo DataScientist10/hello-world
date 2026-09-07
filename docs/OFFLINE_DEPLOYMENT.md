@@ -108,9 +108,16 @@ for it to pick up. Both paths are configurable; see `edge/run.py`.
 
 ## 5. TLS from your own CA (recommended, not required)
 
-Requests are HMAC-signed, so **plain HTTP is not forgeable or replayable**.
-TLS adds confidentiality — worth having, since telemetry is vehicle position
-data.
+Vehicle traffic is HMAC-signed in **both** directions, so plain HTTP is not
+forgeable or replayable *on the vehicle channel*. TLS adds confidentiality —
+worth having, since telemetry is vehicle position data.
+
+The **operator channel is the exception and needs TLS**: `X-Operator-Key` is a
+static bearer token sent verbatim on every request, and whoever captures it can
+call `rotate-secret` to mint a vehicle's signing secret. The hub will refuse to
+start with an operator or provisioning key set unless TLS is configured; for
+local testing only, `HUB_ALLOW_INSECURE_OPERATOR_API=true` accepts the risk
+deliberately.
 
 There is no public CA to ask, so the depot becomes its own trust root:
 
@@ -118,12 +125,21 @@ There is no public CA to ask, so the depot becomes its own trust root:
 ./deploy/make-tls-cert.sh iot-hub.depot.local 10.20.0.10
 ```
 
-Point `HUB_TLS_CERT` / `HUB_TLS_KEY` at `tls/hub.crt` and `tls/hub.key`, copy
-`tls/ca.crt` to every vehicle, and pin it in the agent's SSL context:
+Point `HUB_TLS_CERT` / `HUB_TLS_KEY` at `tls/hub.crt` and `tls/hub.key`, then
+copy `tls/ca.crt` to every vehicle and pin it. Pinning is mandatory, not
+cosmetic: the system trust store cannot contain a CA you created offline, so
+without it an HTTPS hub simply fails to validate.
 
-```python
-ssl.create_default_context(cafile="/etc/av-agent/ca.crt")
+On the vehicle, add the CA path to the credential file:
+
+```json
+{"vehicle_id": "av-001", "secret": "…", "hub_url": "https://iot-hub.depot.local:8080",
+ "ca_cert": "/etc/av-agent/ca.crt"}
 ```
+
+For the operator CLI, pass `--ca-cert /etc/iot-hub/ca.crt` or set `HUB_CA_CERT`.
+Both refuse to fall back to the system trust store if the bundle is unreadable,
+rather than silently trusting the wrong roots.
 
 Certificates are issued for 10 years on purpose: nothing here can renew online,
 and an expired certificate would ground the fleet. **Keep `ca.key` offline** —

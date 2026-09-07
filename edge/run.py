@@ -8,13 +8,16 @@ vehicle's own autonomy stack is expected to write -- replace
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import signal
 import sys
+import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -66,15 +69,41 @@ def build_command_handler(command_dir: Path):
     commands by design.
     """
     command_dir.mkdir(parents=True, exist_ok=True)
+    resolved_dir = command_dir.resolve()
 
     def handle(command: dict) -> dict:
-        target = command_dir / f"{command['command_id']}.json"
+        # command_id becomes a filename, so it must be proven safe first. The
+        # hub only ever issues UUIDs; anything else means the response did not
+        # come from the hub. pathlib does not normalise "..", and an absolute
+        # segment silently discards the base, so a raw id here would let a
+        # forged response write outside the command directory.
+        raw_id = command.get("command_id")
+        try:
+            command_id = str(uuid.UUID(str(raw_id)))
+        except (ValueError, AttributeError, TypeError):
+            log.error("rejecting command with a non-UUID id: %r", raw_id)
+            return {"ok": False, "error": "invalid command_id"}
+
+        target = (command_dir / f"{command_id}.json").resolve()
+        if not target.is_relative_to(resolved_dir):      # belt and braces after the UUID check
+            log.error("rejecting command whose path escapes %s: %r", resolved_dir, raw_id)
+            return {"ok": False, "error": "invalid command_id"}
+
         if target.exists():
             return {"ok": True, "note": "already applied"}
-        temporary = target.with_suffix(".tmp")
-        temporary.write_text(json.dumps(command, indent=2))
-        temporary.rename(target)
-        log.info("accepted command %s (%s)", command["command_id"], command["type"])
+
+        # Write via a random temp name in the same directory so a partially
+        # written file can never be mistaken for a real command.
+        handle_fd, temporary = tempfile.mkstemp(dir=str(resolved_dir), suffix=".tmp")
+        try:
+            with os.fdopen(handle_fd, "w") as stream:
+                json.dump(command, stream, indent=2)
+            os.replace(temporary, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise
+        log.info("accepted command %s (%s)", command_id, command.get("type"))
         return {"ok": True, "accepted_at": time.time()}
 
     return handle

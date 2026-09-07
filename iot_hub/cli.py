@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import ssl
 import stat
 import sys
 import time
@@ -129,13 +130,24 @@ def _request(args: argparse.Namespace, method: str, path: str, payload: dict | N
     if not key:
         print("error: pass --operator-key or set HUB_OPERATOR_KEY", file=sys.stderr)
         raise SystemExit(2)
+    # There is no public CA here, so an HTTPS hub must be validated against the
+    # depot's own CA; the default trust store cannot contain it.
+    ca_cert = getattr(args, "ca_cert", "") or os.environ.get("HUB_CA_CERT", "")
+    context = None
+    if ca_cert:
+        try:
+            context = ssl.create_default_context(cafile=ca_cert)
+        except OSError as exc:
+            print(f"error: cannot read CA bundle {ca_cert}: {exc}", file=sys.stderr)
+            raise SystemExit(2) from None
+
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(
         args.url.rstrip("/") + path, data=data, method=method,
         headers={HEADER_OPERATOR: key, "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=30, context=context) as response:
             return response.status, json.loads(response.read() or b"{}")
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read() or b"{}")
@@ -210,11 +222,13 @@ def build_parser() -> argparse.ArgumentParser:
         remote = sub.add_parser(name, help=help_text)
         remote.add_argument("--url", default="http://127.0.0.1:8080")
         remote.add_argument("--operator-key", default="")
+        remote.add_argument("--ca-cert", default="", help="depot CA bundle to pin for HTTPS")
         remote.set_defaults(func=func)
 
     command = sub.add_parser("command", help="send a command to one vehicle")
     command.add_argument("--url", default="http://127.0.0.1:8080")
     command.add_argument("--operator-key", default="")
+    command.add_argument("--ca-cert", default="", help="depot CA bundle to pin for HTTPS")
     command.add_argument("--vehicle", required=True)
     command.add_argument("--type", required=True)
     command.add_argument("--payload", help="JSON object")
@@ -223,6 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     broadcast = sub.add_parser("broadcast", help="send a command to the whole fleet")
     broadcast.add_argument("--url", default="http://127.0.0.1:8080")
     broadcast.add_argument("--operator-key", default="")
+    broadcast.add_argument("--ca-cert", default="", help="depot CA bundle to pin for HTTPS")
     broadcast.add_argument("--type", required=True)
     broadcast.add_argument("--payload", help="JSON object")
     broadcast.add_argument("--vehicles", help="comma-separated ids (default: every active vehicle)")

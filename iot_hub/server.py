@@ -188,7 +188,11 @@ def serve(config: Config | None = None) -> int:
         scheme, config.host, config.port, config.fleet_size, hub.registry.count(), config.db_path,
     )
     if not config.tls_enabled:
-        log.info("TLS is off: requests are still HMAC-signed, so they cannot be forged or replayed")
+        log.info("TLS is off: vehicle requests and hub responses are both HMAC-signed, "
+                 "so the vehicle channel cannot be forged or replayed")
+        if config.operator_key or config.provisioning_key:
+            log.warning("operator/provisioning key is being sent in cleartext over HTTP; "
+                        "anyone on this LAN can capture it and mint vehicle secrets")
     if not config.operator_key:
         log.warning("HUB_OPERATOR_KEY is unset: the operator API will refuse every request")
 

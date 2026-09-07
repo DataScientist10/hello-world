@@ -81,6 +81,10 @@ jobs:
       - name: Provision, run and drive a fleet
         env:
           HUB_OPERATOR_KEY: ci-smoke-key
+          # The hub refuses a cleartext operator key unless told to. CI runs on
+          # loopback with a throwaway key, which is exactly the case the opt-out
+          # exists for; a real depot configures TLS instead.
+          HUB_ALLOW_INSECURE_OPERATOR_API: 'true'
           FLEET: '60'
           # Match the roster the job provisions, so /readyz is a clean signal
           # rather than warning that 390 vehicles are missing.
