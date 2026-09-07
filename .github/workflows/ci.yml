@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  # Only the default branch runs on push. A branch with an open pull request
+  # is already covered by the pull_request event, and listening to both fires
+  # every job twice.
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The deployment guide claims 3.9+; the matrix is what keeps that honest.
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Note the absence of a dependency-install step: that is the point of
+      # this project, not an omission.
+      - name: Byte-compile every module
+        run: python -m compileall -q iot_hub edge tools tests
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -t .
+
+  stdlib-only:
+    name: no third-party dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The hub has to install onto an air-gapped depot server with no package
+      # index reachable. Importing every entry point with site-packages removed
+      # from sys.path proves nothing has quietly crept in.
+      - name: Import everything without site-packages
+        run: |
+          python - <<'PY'
+          import pathlib, sys
+
+          repo = str(pathlib.Path.cwd())
+          sys.path = [p for p in sys.path if "packages" not in p]
+          sys.path.insert(0, repo)
+
+          import edge.agent, edge.run, edge.spool          # noqa: F401
+          import iot_hub.cli, iot_hub.server               # noqa: F401
+          import tools.simulate_fleet                      # noqa: F401
+          print("stdlib-only: every entry point imports with no site-packages")
+          PY
+
+  fleet-smoke:
+    name: end-to-end fleet smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Start, drive and verify in one step: a hub backgrounded in an earlier
+      # step is not reliably still around in a later one.
+      - name: Provision, run and drive a fleet
+        env:
+          HUB_OPERATOR_KEY: ci-smoke-key
+          FLEET: '60'
+          # Match the roster the job provisions, so /readyz is a clean signal
+          # rather than warning that 390 vehicles are missing.
+          HUB_FLEET_SIZE: '60'
+        run: |
+          set -euo pipefail
+
+          python -m iot_hub provision --count "$FLEET" --data-dir ./data \
+              --out ./credentials --hub-url http://127.0.0.1:8080
+
+          HUB_DATA_DIR=./data HUB_PORT=8080 python -m iot_hub serve > hub.log 2>&1 &
+          HUB_PID=$!
+          trap 'kill "$HUB_PID" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 30); do
+              curl -sf http://127.0.0.1:8080/readyz > /dev/null && break
+              sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/readyz
+
+          python tools/simulate_fleet.py --credentials ./credentials \
+              --url http://127.0.0.1:8080 --duration 20 --stagger 3 \
+              --operator-key "$HUB_OPERATOR_KEY" --broadcast
+
+          python - <<'PY'
+          import json, os, urllib.request
+
+          expected = int(os.environ["FLEET"])
+          request = urllib.request.Request(
+              "http://127.0.0.1:8080/v1/fleet",
+              headers={"X-Operator-Key": os.environ["HUB_OPERATOR_KEY"]},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              fleet = json.load(response)
+          print(json.dumps(fleet, indent=2))
+
+          assert fleet["fleet_size"] == expected, fleet
+          assert fleet["online"] == expected, f"{fleet['offline']} vehicle(s) went offline"
+          assert fleet["reporting"] == expected, "not every vehicle delivered telemetry"
+          # The broadcast pull_over must have been applied by every vehicle.
+          assert fleet["modes"].get("parked") == expected, fleet["modes"]
+          print(f"smoke test passed: {expected}/{expected} vehicles online and stopped on command")
+          PY
+
+      - name: Hub log
+        if: always()
+        run: tail -50 hub.log || true

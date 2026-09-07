@@ -1,0 +1,13 @@
+# Runtime state and, above all, fleet credentials -- never commit these.
+credentials/
+*.db
+*.db-wal
+*.db-shm
+data/
+tls/
+*.key
+*.crt
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
