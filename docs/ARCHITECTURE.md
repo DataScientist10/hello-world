@@ -21,26 +21,44 @@ determines nearly every decision below.
 ## Shape of the system
 
 ```
-        VEHICLE (x450)                        DEPOT HUB (1 process)
-  ┌───────────────────────────┐        ┌──────────────────────────────────┐
-  │ autonomy stack            │        │  ThreadingHTTPServer (HTTP/1.1)  │
-  │        │ state.json       │        │            │                     │
-  │        ▼                  │        │            ▼                     │
-  │   sampler (1 Hz)          │        │       Api router                 │
-  │        │                  │        │   ┌────────┴─────────┐           │
-  │        ▼                  │        │   ▼                  ▼           │
-  │   SPOOL (SQLite, on disk) │        │ Authenticator    Registry (RAM)  │
-  │        │                  │        │ HMAC + nonce     450 vehicles    │
-  │        ▼                  │        │   │                  │           │
-  │   uploader ──────POST /v1/telemetry────►TelemetryService  │           │
-  │                           │        │      │  live map (RAM)           │
-  │   long-poll ◄────GET /v1/commands──── CommandQueue        │           │
-  │        │                  │        │      │  lease + wake events      │
-  │        ▼                  │        │      ▼                           │
-  │   command handler ──POST .../ack───►  Storage: 1 writer thread,       │
-  └───────────────────────────┘        │  group commit, WAL, SQLite       │
-                                       └──────────────────────────────────┘
-        operator console ──X-Operator-Key──► /v1/fleet, /v1/commands/broadcast
+          VEHICLE (x450)                         DEPOT HUB (1 process)
+   ┌───────────────────────────┐         ┌──────────────────────────────────┐
+   │ autonomy stack            │         │  ThreadingHTTPServer (HTTP/1.1)  │
+   │        │ state.json       │         │            │                     │
+   │        ▼                  │         │            ▼                     │
+   │   sampler (1 Hz, seq)     │         │       Api router                 │
+   │        │                  │         │   ┌────────┴─────────┐           │
+   │        ▼                  │         │   ▼                  ▼           │
+   │   SPOOL (SQLite on disk)  │         │ Authenticator    Registry (RAM)  │
+   │        │  survives power  │         │ HMAC + nonce     450 vehicles    │
+   │        │  loss; bounded   │         │ signs + verifies + their secrets │
+   │        ▼                  │         │   │                              │
+   │   uploader (batch / 5 s)  │         │   ▼                              │
+   │        │                  │         │ TelemetryService                 │
+   │        ▼                  │         │   │  live fleet map (RAM)        │
+   │   verifier                │         │   │                              │
+   │        │  drops unsigned  │         │ CommandQueue                     │
+   │        │  replies         │         │   │  60 s lease, per-vehicle     │
+   │        ▼                  │         │   │  wake events                 │
+   │   command handler         │         │   ▼                              │
+   │   (idempotent on id,      │         │ Storage: one writer thread,      │
+   │    re-validates type)     │         │ group commit, WAL, SQLite        │
+   └───────────────────────────┘         └──────────────────────────────────┘
+              │                                          ▲
+              │  ──── POST /v1/telemetry ──────────────► │
+              │  ◄─── GET /v1/commands?wait=25 ───────── │   REQUEST SIGNED
+              │  ──── POST /v1/commands/{id}/ack ──────► │   RESPONSE SIGNED
+              │                                          │
+              └─────────── UNTRUSTED DEPOT LAN ──────────┘
+                    physical taps, maintenance laptops,
+                    no internet uplink, TLS optional
+
+   operator console ─── X-Operator-Key ───► /v1/fleet, /v1/commands/broadcast
+                        bearer token, NOT signed -- TLS required, and the hub
+                        refuses to start without it
+
+   probes (no credential) ─────────────────► /healthz  /readyz  /metrics
+                                             /v1/time -- the fleet's clock
 ```
 
 ## The five decisions that matter
