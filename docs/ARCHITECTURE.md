@@ -106,8 +106,28 @@ signature = HMAC-SHA256(secret, "v1\nMETHOD\n/path?query\ntimestamp\nnonce\nSHA2
 The path *including its query string* and a digest of the body are covered, so
 an attacker can neither alter a reported position nor rewrite `?wait=`. The
 timestamp bounds replay to a 300 s window and the nonce cache eliminates it
-inside that window. TLS is available on top for confidentiality, but the
-system is not forgeable without it.
+inside that window.
+
+**Responses are signed too**, over the request's nonce, the status and a body
+digest:
+
+```
+X-Response-Signature = HMAC-SHA256(secret, "v1-response\nnonce\nstatus\nSHA256(body)")
+```
+
+This matters more than it might look. Downlink is the channel that carries
+`pull_over` and `set_speed_limit`; if only requests were signed, anyone able to
+answer a long poll — an ARP spoof from a maintenance laptop — could command the
+fleet while holding no credential at all. Binding the signature to the
+request's nonce also stops a genuine older response being replayed against a
+later poll. The vehicle re-validates every command against `COMMAND_TYPES` and
+the payload rules before acting, so the hub is not a single point of trust.
+
+TLS from the depot CA is available on top for confidentiality. The **operator**
+channel does not get this protection — its key is a bearer token, not a proof
+of possession — so the hub refuses to start with an operator or provisioning
+key configured unless TLS is enabled or the risk is explicitly accepted with
+`HUB_ALLOW_INSECURE_OPERATOR_API`.
 
 ## Capacity: does 450 fit?
 

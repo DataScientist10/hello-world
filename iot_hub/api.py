@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from .auth import AuthError
+from .auth import HEADER_NONCE, HEADER_RESPONSE_SIGNATURE, AuthError, sign_response
 from .models import ValidationError
 from .registry import VehicleExists
 
@@ -191,7 +191,29 @@ class Api:
             histogram = "hub_long_poll_seconds" if route and route.handler is Api.poll_commands \
                 else "hub_request_seconds"
             self.hub.metrics.observe(histogram, elapsed)
+
+        # Sign the response with the requesting vehicle's own secret. The
+        # uplink was always authenticated; without this the *downlink* is not,
+        # and anyone who can answer a long poll on the depot LAN can issue
+        # commands to a vehicle without holding any credential at all.
+        self._sign_response_if_vehicle(route, request, response)
         return response
+
+    def _sign_response_if_vehicle(self, route: Route | None, request: Request, response: Response) -> None:
+        """Attach X-Response-Signature when the caller proved a vehicle identity.
+
+        Only possible once the request has authenticated: an unauthenticated or
+        rejected request has no shared secret to sign with, which is why a 401
+        carries no signature and the agent treats an unsigned reply as hostile
+        for everything except the bootstrap endpoints.
+        """
+        vehicle = getattr(request, "vehicle", None)
+        if route is None or route.auth != "vehicle" or vehicle is None:
+            return
+        nonce = request.headers.get(HEADER_NONCE) or ""
+        response.headers[HEADER_RESPONSE_SIGNATURE] = sign_response(
+            vehicle.secret, nonce, response.status, response.body
+        )
 
     def _match(self, request: Request) -> Route:
         path_matched = False

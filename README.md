@@ -44,11 +44,16 @@ each vehicle **long-polls**: it holds a `GET /v1/commands?wait=25` open and the
 hub answers the instant a command is queued. Delivery is at-least-once with a
 60-second visibility lease, so a command survives a vehicle rebooting mid-task.
 
-**Security** — an isolated network is not a trusted one. Every vehicle request
-is **HMAC-SHA256 signed** over the method, path, query, timestamp, nonce and a
-digest of the body. Tampering, forgery and replay are all rejected without
-relying on TLS at all; TLS from a local offline CA can be layered on for
-confidentiality.
+**Security** — an isolated network is not a trusted one. Vehicle traffic is
+**HMAC-SHA256 signed in both directions**: requests over the method, path,
+query, timestamp, nonce and body digest; responses over the request's nonce,
+status and body digest. So a machine on the depot LAN can neither forge a
+vehicle's telemetry nor impersonate the hub to issue commands — without TLS at
+all. TLS from a local offline CA adds confidentiality on top.
+
+The **operator** API is different and is deliberately held to a stricter rule:
+its key is a bearer token sent verbatim, so the hub refuses to start with one
+configured unless TLS is on (or you opt out explicitly for local testing).
 
 **Time** — with no NTP upstream, the hub is the fleet's clock. A vehicle whose
 signature is rejected for drift gets the hub's time back with the 401 and
@@ -64,8 +69,10 @@ capacity limits.
 python3 -m iot_hub provision --count 450 --data-dir ./data --out ./credentials \
                              --hub-url http://127.0.0.1:8080
 
-# 2. run the hub
-HUB_OPERATOR_KEY=secret HUB_DATA_DIR=./data python3 -m iot_hub serve
+# 2. run the hub (the insecure-operator opt-out is for local testing only:
+#    a real depot configures TLS instead -- see docs/OFFLINE_DEPLOYMENT.md)
+HUB_OPERATOR_KEY=secret HUB_ALLOW_INSECURE_OPERATOR_API=true \
+    HUB_DATA_DIR=./data python3 -m iot_hub serve
 
 # 3. in another terminal: drive the whole fleet against it
 python3 tools/simulate_fleet.py --credentials ./credentials --duration 60 \

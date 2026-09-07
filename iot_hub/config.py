@@ -73,6 +73,12 @@ class Config:
     provisioning_key: str = ""
     #: Key operators/back-office tools present on the read + command API.
     operator_key: str = ""
+    #: Operator and provisioning keys are static bearer tokens: unlike a vehicle
+    #: signature, the secret itself crosses the wire on every request, and the
+    #: operator API can hand out vehicle secrets. Over plain HTTP on an
+    #: untrusted LAN one passive tap captures it, so TLS is required unless an
+    #: operator deliberately opts out (local testing, a trusted loopback).
+    allow_insecure_operator_api: bool = False
 
     # --- ingest ------------------------------------------------------------
     max_body_bytes: int = 1_048_576
@@ -111,6 +117,7 @@ class Config:
             clock_skew_tolerance_seconds=_env_int("HUB_CLOCK_SKEW_SECONDS", 300),
             provisioning_key=os.environ.get("HUB_PROVISIONING_KEY", ""),
             operator_key=os.environ.get("HUB_OPERATOR_KEY", ""),
+            allow_insecure_operator_api=_env_bool("HUB_ALLOW_INSECURE_OPERATOR_API", False),
             max_body_bytes=_env_int("HUB_MAX_BODY_BYTES", 1_048_576),
             max_batch_points=_env_int("HUB_MAX_BATCH_POINTS", 500),
             max_long_poll_seconds=_env_float("HUB_MAX_LONG_POLL_SECONDS", 25.0),
@@ -121,7 +128,27 @@ class Config:
         )
         if _env_bool("HUB_REQUIRE_TLS", False) and not cfg.tls_enabled:
             raise ValueError("HUB_REQUIRE_TLS is set but HUB_TLS_CERT/HUB_TLS_KEY are not")
+        cfg.check_operator_channel()
         return cfg
+
+    def check_operator_channel(self) -> None:
+        """Fail fast rather than leak a privileged credential in cleartext.
+
+        A vehicle proves possession of its secret without transmitting it. The
+        operator key is the opposite -- it is sent verbatim on every request and
+        never expires -- and it can mint vehicle secrets via rotate-secret, so
+        capturing it defeats the vehicle scheme entirely.
+        """
+        if not (self.operator_key or self.provisioning_key):
+            return
+        if self.tls_enabled or self.allow_insecure_operator_api:
+            return
+        raise ValueError(
+            "HUB_OPERATOR_KEY/HUB_PROVISIONING_KEY is set without TLS. These are bearer "
+            "tokens sent in cleartext and can be captured by anyone on the LAN. "
+            "Set HUB_TLS_CERT/HUB_TLS_KEY, or set HUB_ALLOW_INSECURE_OPERATOR_API=true "
+            "to accept that risk deliberately (testing or a trusted loopback only)."
+        )
 
     @property
     def tls_enabled(self) -> bool:

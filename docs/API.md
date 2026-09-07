@@ -36,6 +36,21 @@ A 401 whose message mentions the time window includes `error.hub_time`, so an
 agent with a drifting clock can correct itself and retry. `edge/agent.py`
 does this automatically.
 
+### Verifying the hub's reply
+
+Every response to an authenticated **vehicle** request carries:
+
+```
+X-Response-Signature = HMAC-SHA256(secret, "v1-response\n" + REQUEST_NONCE + "\n" + STATUS + "\n" + SHA256_HEX(BODY))
+```
+
+A vehicle MUST reject any 2xx reply that fails this check — that is what stops
+a machine on the depot LAN from impersonating the hub and issuing commands.
+Non-2xx replies (401 in particular) are unsigned, because a failed
+authentication means there is no agreed secret to sign with; treat those as
+untrusted. Operator responses are unsigned: operators hold no per-vehicle
+secret, which is why that channel requires TLS instead.
+
 ---
 
 ## Vehicle endpoints
@@ -107,7 +122,9 @@ Field replacement for a vehicle with no credential. Requires
 (the recommended setting — prefer offline provisioning).
 
 **201** returns the vehicle *including its `secret`*. This is the only time the
-hub ever discloses it.
+hub discloses it for that enrollment — but note `rotate-secret` issues and
+returns a *new* one on demand to any holder of the operator key, which is part
+of why the operator channel requires TLS.
 
 ---
 

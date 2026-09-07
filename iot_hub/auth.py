@@ -23,10 +23,12 @@ HEADER_VEHICLE = "X-Vehicle-Id"
 HEADER_TIMESTAMP = "X-Timestamp"
 HEADER_NONCE = "X-Nonce"
 HEADER_SIGNATURE = "X-Signature"
+HEADER_RESPONSE_SIGNATURE = "X-Response-Signature"
 HEADER_OPERATOR = "X-Operator-Key"
 HEADER_PROVISIONING = "X-Provisioning-Key"
 
 SIGNATURE_VERSION = "v1"
+RESPONSE_SIGNATURE_VERSION = "v1-response"
 
 
 class AuthError(Exception):
@@ -58,6 +60,29 @@ def canonical_string(method: str, path: str, timestamp: str, nonce: str, body: b
 def sign(secret: str, method: str, path: str, timestamp: str, nonce: str, body: bytes) -> str:
     message = canonical_string(method, path, timestamp, nonce, body).encode("utf-8")
     return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def response_canonical_string(request_nonce: str, status: int, body: bytes) -> str:
+    """The bytes both sides sign for a *response*.
+
+    Binding the signature to the request's nonce is what stops an attacker
+    replaying a genuine older response (an empty command list, say) against a
+    later poll: the nonce is fresh per request and never repeats.
+    """
+    return "\n".join([RESPONSE_SIGNATURE_VERSION, request_nonce, str(status), body_digest(body)])
+
+
+def sign_response(secret: str, request_nonce: str, status: int, body: bytes) -> str:
+    message = response_canonical_string(request_nonce, status, body).encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def verify_response(secret: str, request_nonce: str, status: int, body: bytes, signature: str | None) -> bool:
+    """Constant-time check that a response really came from the hub."""
+    if not signature:
+        return False
+    expected = sign_response(secret, request_nonce, status, body)
+    return hmac.compare_digest(expected, signature)
 
 
 def signed_headers(vehicle_id: str, secret: str, method: str, path: str, body: bytes) -> dict[str, str]:
