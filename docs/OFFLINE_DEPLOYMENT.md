@@ -185,6 +185,9 @@ curl -X POST -H "X-Operator-Key: $HUB_OPERATOR_KEY" \
 | `hub_command_leases_expired_total` rising | Vehicles dropping out mid-command |
 | `hub_telemetry_gap_points_total` rising | Spools overflowing — outages exceed spool capacity |
 | `hub_database_bytes` approaching disk | Lower retention or sample rate |
+| `hub_disk_state` at 1 (warning) | Purging harder than retention alone; plan more disk |
+| `hub_disk_state` at 2 (critical) | **Telemetry is being shed**; commands still dispatch. Add disk or lower the sample rate |
+| `hub_telemetry_shed_total` rising | Uploads are being refused — vehicles are buffering and will catch up |
 
 ### Backups
 
@@ -210,3 +213,4 @@ credential material: encrypt it, and control who can carry it off site.
 | Vehicle uploads nothing, spool growing | Hub unreachable | Check LAN, `/etc/hosts`, and `systemctl status iot-hub` |
 | Commands never arrive | Long poll blocked | Check for a proxy or switch with an idle timeout below 25 s; lower `HUB_MAX_LONG_POLL_SECONDS` |
 | Disk filling | Retention too long for the sample rate | Lower `HUB_TELEMETRY_RETENTION_HOURS` or `AV_SAMPLE_INTERVAL` |
+| Vehicles get `503 ... not accepting telemetry` | Disk critically low; the hub is shedding to protect command dispatch | Add disk or lower the sample rate. Vehicles buffer meanwhile and catch up on their own; commands are unaffected |
