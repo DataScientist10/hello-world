@@ -1,0 +1,40 @@
+# systemd unit for the depot IoT hub.
+#
+#   sudo cp deploy/iot-hub.service /etc/systemd/system/
+#   sudo cp deploy/iot-hub.env     /etc/iot-hub.env   # then edit the keys
+#   sudo systemctl enable --now iot-hub
+
+[Unit]
+Description=Offline IoT hub for the autonomous-vehicle fleet
+Documentation=file:///opt/iot-hub/docs/ARCHITECTURE.md
+After=network.target
+# Deliberately no network-online.target: this host has no internet and must
+# come up regardless of whether any uplink ever appears.
+
+[Service]
+Type=simple
+User=iot-hub
+Group=iot-hub
+WorkingDirectory=/opt/iot-hub
+EnvironmentFile=/etc/iot-hub.env
+ExecStart=/usr/bin/python3 -m iot_hub serve
+Restart=always
+RestartSec=3
+# The hub is the fleet's only contact point; give it room for one long-poll
+# connection per vehicle plus headroom for reconnect bursts.
+LimitNOFILE=16384
+
+# Hardening: the hub needs its data directory and a listening socket, nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/iot-hub
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

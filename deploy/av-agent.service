@@ -1,0 +1,27 @@
+# systemd unit for the agent running on each vehicle.
+#
+# Install alongside the vehicle's credential file (mode 0600, owned by av-agent)
+# at /etc/av-agent/credential.json.
+
+[Unit]
+Description=Autonomous vehicle telemetry and command agent
+After=network.target
+
+[Service]
+Type=simple
+User=av-agent
+Group=av-agent
+WorkingDirectory=/opt/av-agent
+Environment=AV_CREDENTIAL=/etc/av-agent/credential.json
+Environment=AV_SPOOL=/var/lib/av-agent/spool.db
+ExecStart=/usr/bin/python3 -m edge.run
+Restart=always
+# Restart quickly: a vehicle without an agent is a vehicle the depot cannot see.
+RestartSec=2
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/av-agent
+
+[Install]
+WantedBy=multi-user.target
