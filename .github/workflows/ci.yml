@@ -1,8 +1,11 @@
 name: CI
 
 on:
+  # Only the default branch runs on push. A branch with an open pull request
+  # is already covered by the pull_request event, and listening to both fires
+  # every job twice.
   push:
-    branches: ['**']
+    branches: [master]
   pull_request:
 
 permissions:
