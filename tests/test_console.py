@@ -105,6 +105,23 @@ class ConsoleContentTests(unittest.TestCase):
         self.assertIn("sessionStorage", self.code)
         self.assertAbsent("localStorage", "an operator key must not outlive the browser tab")
 
+    def test_attention_panel_has_a_resting_state(self):
+        """A blank panel is ambiguous: broken, still loading, or genuinely clear?
+
+        An operations console spends most of its life with nothing to flag, so
+        the quiet state is the one an operator sees most and has to trust.
+        """
+        self.assertIn("All ", self.code)
+        self.assertIn("vehicles nominal", self.code)
+        self.assertIn("no faults, no low battery, no stale reports", self.code)
+
+    def test_quiet_and_silent_are_told_apart(self):
+        """A fleet with nothing wrong and a fleet saying nothing are not the same."""
+        self.assertIn("No vehicles reporting", self.code)
+        self.assertIn("nothing has uploaded telemetry yet", self.code)
+        self.assertIn("empty clear", self.code)
+        self.assertIn("empty idle", self.code)
+
     def test_console_only_calls_read_endpoints(self):
         """A read-only key must be enough; anything else would demand the write key."""
         calls = re.findall(r'api\("(/v1/[^"]+)"', self.code)
