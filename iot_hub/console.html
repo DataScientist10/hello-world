@@ -89,6 +89,16 @@
   .qwhat { font-size:12.5px; color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .qage { font-family:var(--mono); font-size:11px; color:var(--faint); font-variant-numeric:tabular-nums; }
 
+  /* An operations panel spends most of its life empty. Say so deliberately --
+     a blank panel reads as broken or still loading, which is the opposite of
+     the reassurance it should give. */
+  .empty { display:flex; flex-direction:column; align-items:center; justify-content:center;
+           gap:5px; padding:52px 20px; text-align:center; }
+  .empty strong { font-size:13px; font-weight:600; }
+  .empty.clear strong { color:var(--good); }
+  .empty.idle strong { color:var(--muted); }
+  .empty span { font-family:var(--mono); font-size:11px; color:var(--faint); }
+
   .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
           border-top:1px solid var(--line-soft); border-left:1px solid var(--line-soft); }
   .kpi { border-bottom:1px solid var(--line-soft); border-right:1px solid var(--line-soft);
@@ -394,9 +404,28 @@
       .filter(function (r) { return r.st !== "nominal"; })
       .sort(function (a, b) { return (rank[a.st] - rank[b.st]) || ((now - b.v.received_at) - (now - a.v.received_at)); });
 
-    $("queue-count").textContent = needs.length + (needs.length === 1 ? " vehicle" : " vehicles");
+    $("queue-count").textContent = needs.length
+      ? needs.length + (needs.length === 1 ? " vehicle" : " vehicles")
+      : "all clear";
     var q = $("queue");
     while (q.firstChild) q.removeChild(q.firstChild);
+
+    if (!needs.length) {
+      // Two different kinds of empty, and conflating them would mislead:
+      // a quiet fleet is good news, a silent one is not.
+      var rest = document.createElement("div");
+      if (points.length) {
+        rest.className = "empty clear";
+        rest.appendChild(text("strong", null, "All " + points.length + " vehicles nominal"));
+        rest.appendChild(text("span", null, "no faults, no low battery, no stale reports"));
+      } else {
+        rest.className = "empty idle";
+        rest.appendChild(text("strong", null, "No vehicles reporting"));
+        rest.appendChild(text("span", null, "nothing has uploaded telemetry yet"));
+      }
+      q.appendChild(rest);
+      return;
+    }
 
     needs.forEach(function (r) {
       var v = r.v, row = document.createElement("button");
