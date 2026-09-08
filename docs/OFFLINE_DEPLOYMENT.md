@@ -156,6 +156,27 @@ Keep the **hub's** clock sane — an RTC with a good battery, or a local GPS
 time source if the depot has one. If the hub's clock jumps, the whole fleet
 follows it.
 
+## The operator console
+
+Point a browser on the depot LAN at:
+
+```
+http://iot-hub.depot.local:8080/console
+```
+
+It asks for a key, and a **viewer key** is the right one to give it — the
+console only ever issues `GET`s, so it needs nothing more. The key is held in
+that browser tab (`sessionStorage`) and disappears when the tab closes; it is
+never written into the page and never sent anywhere but this hub.
+
+The console is served *by the hub*, which is the only arrangement that works
+here: there is no internet, so no CDN to load a framework from, and no
+cross-origin to negotiate. It draws positions by projecting the fleet's own
+bounding box onto a plain grid with a scale bar — there are no map tiles to
+fetch either.
+
+Set `HUB_CONSOLE_ENABLED=false` on a hub you drive entirely from the CLI.
+
 ## Operating
 
 ```bash

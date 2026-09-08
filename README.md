@@ -79,7 +79,8 @@ python3 tools/simulate_fleet.py --credentials ./credentials --duration 60 \
                                 --operator-key secret --broadcast
 ```
 
-Then look at it:
+Then open the console at **http://localhost:8080/console** and give it the
+viewer key, or look at it from the shell:
 
 ```bash
 export HUB_OPERATOR_KEY=secret

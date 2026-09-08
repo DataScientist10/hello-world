@@ -213,6 +213,7 @@ cannot invent new verbs.
 
 | Path | Returns |
 |---|---|
+| `GET /console` | The operator console (HTML). Inert until a key is supplied |
 | `GET /healthz` | `200` if the process is alive |
 | `GET /readyz` | `200` ready / `503` not ready, plus per-check detail |
 | `GET /metrics` | Prometheus text format |
